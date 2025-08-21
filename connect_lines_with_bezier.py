@@ -583,24 +583,22 @@ if __name__ == '__main__':
             raise ValueError(u"输入要素 (参数 0) 未提供或无效。")
         arcpy.AddMessage(u"参数 0 获取成功。")
 
-        arcpy.AddMessage(u"正在获取参数 1 (输出路径)...")
-        output_fc = arcpy.GetParameterAsText(1)
-        if not output_fc:
-            raise ValueError(u"输出要素类路径 (参数 1) 未提供。")
-        arcpy.AddMessage(u"参数 1 (输出路径): {0}".format(output_fc))
+        # 不再需要输出路径参数，直接写入输入要素类
+        output_fc = input_features
+        arcpy.AddMessage(u"将在输入要素类中添加贝塞尔曲线")
 
-        arcpy.AddMessage(u"正在获取参数 2 (曲线饱满度)...")
-        fullness_factor = arcpy.GetParameter(2)
+        arcpy.AddMessage(u"正在获取参数 1 (曲线饱满度)...")
+        fullness_factor = arcpy.GetParameter(1)
         if fullness_factor is None:
-            raise ValueError(u"曲线饱满度 (参数 2) 未提供。")
-        arcpy.AddMessage(u"参数 2 (曲线饱满度): {}".format(fullness_factor))
+            raise ValueError(u"曲线饱满度 (参数 1) 未提供。")
+        arcpy.AddMessage(u"参数 1 (曲线饱满度): {}".format(fullness_factor))
 
-        arcpy.AddMessage(u"正在获取参数 3 (曲线平滑度)...")
-        num_points = arcpy.GetParameter(3)
+        arcpy.AddMessage(u"正在获取参数 2 (曲线平滑度)...")
+        num_points = arcpy.GetParameter(2)
         if num_points is None or num_points < 2:
             num_points = 20  # 默认值
             arcpy.AddWarning(u"曲线平滑度参数无效，使用默认值: {}".format(num_points))
-        arcpy.AddMessage(u"参数 3 (曲线平滑度): {}".format(num_points))
+        arcpy.AddMessage(u"参数 2 (曲线平滑度): {}".format(num_points))
 
         arcpy.AddMessage(u"所有参数获取成功。")
 
@@ -643,15 +641,8 @@ if __name__ == '__main__':
         #             spatial_ref = None
         #             arcpy.AddWarning(u"无法设置空间参考系统，将使用无空间参考模式")
 
-        # 创建输出要素类
-        arcpy.AddMessage(u"正在创建输出要素类...")
-        arcpy.CreateFeatureclass_management(
-            out_path=os.path.dirname(output_fc),
-            out_name=os.path.basename(output_fc),
-            geometry_type="POLYLINE",
-            spatial_reference=spatial_ref
-        )
-        arcpy.AddMessage(u"输出要素类创建成功。")
+        # 直接使用输入要素类，不需要创建新的输出要素类
+        arcpy.AddMessage(u"将直接在输入要素类中添加贝塞尔曲线")
 
         # 读取输入的线要素
         arcpy.AddMessage(u"正在读取输入要素...")
@@ -878,17 +869,99 @@ if __name__ == '__main__':
                     curves.append(curve)
                     arcpy.AddMessage(u"成功创建第 {0} 条贝塞尔曲线".format(i + 1))
         
-        # 将曲线写入输出要素类
-        with arcpy.da.InsertCursor(output_fc, ["SHAPE@"]) as insert_cursor:
-            curves_created = 0
-            for curve in curves:
-                if curve:
-                    insert_cursor.insertRow([curve])
-                    curves_created += 1
+        # 将曲线写入输入要素类（使用编辑会话避免锁定问题）
+        arcpy.AddMessage(u"开始将贝塞尔曲线写入输入要素类...")
+        
+        # 获取工作空间路径
+        workspace = os.path.dirname(desc.catalogPath) if hasattr(desc, 'catalogPath') and desc.catalogPath else None
+        
+        if workspace and workspace.endswith('.gdb'):
+            # 地理数据库需要编辑会话
+            arcpy.AddMessage(u"检测到地理数据库，启动编辑会话...")
+            edit = arcpy.da.Editor(workspace)
+            edit.startEditing(False, True)
+            edit.startOperation()
             
-            arcpy.AddMessage(u"总共成功创建了 {0} 条方向性贝塞尔曲线".format(curves_created))
+            try:
+                with arcpy.da.InsertCursor(input_features, ["SHAPE@"]) as insert_cursor:
+                    curves_created = 0
+                    for curve in curves:
+                        if curve:
+                            insert_cursor.insertRow([curve])
+                            curves_created += 1
+                    
+                    arcpy.AddMessage(u"总共成功创建了 {0} 条方向性贝塞尔曲线".format(curves_created))
+                
+                edit.stopOperation()
+                edit.stopEditing(True)
+                arcpy.AddMessage(u"编辑会话已保存并关闭")
+                
+            except Exception as edit_error:
+                edit.stopOperation()
+                edit.stopEditing(False)
+                arcpy.AddError(u"编辑会话中出错: {0}".format(edit_error))
+                raise
+        else:
+             # Shapefile或其他格式，需要特殊处理避免锁定
+             arcpy.AddMessage(u"检测到Shapefile格式，使用特殊方法插入...")
+             
+             # 先清除选择集，避免锁定冲突
+             try:
+                 arcpy.SelectLayerByAttribute_management(input_features, "CLEAR_SELECTION")
+                 arcpy.AddMessage(u"已清除选择集")
+             except:
+                 arcpy.AddMessage(u"无法清除选择集，继续尝试插入")
+             
+             # 获取数据源路径
+             data_source = desc.catalogPath if hasattr(desc, 'catalogPath') and desc.catalogPath else input_features
+             arcpy.AddMessage(u"使用数据源: {0}".format(data_source))
+             
+             try:
+                 with arcpy.da.InsertCursor(data_source, ["SHAPE@"]) as insert_cursor:
+                     curves_created = 0
+                     for curve in curves:
+                         if curve:
+                             insert_cursor.insertRow([curve])
+                             curves_created += 1
+                     
+                     arcpy.AddMessage(u"总共成功创建了 {0} 条方向性贝塞尔曲线".format(curves_created))
+             except Exception as insert_error:
+                 arcpy.AddMessage(u"直接插入失败，尝试使用临时要素类方法: {0}".format(insert_error))
+                 
+                 # 创建临时要素类存储贝塞尔曲线
+                 import tempfile
+                 temp_dir = tempfile.gettempdir()
+                 temp_curves_fc = os.path.join(temp_dir, "temp_bezier_curves.shp")
+                 
+                 if arcpy.Exists(temp_curves_fc):
+                     arcpy.Delete_management(temp_curves_fc)
+                 
+                 # 创建临时要素类
+                 arcpy.CreateFeatureclass_management(
+                     temp_dir, "temp_bezier_curves.shp", "POLYLINE", 
+                     spatial_reference=spatial_ref
+                 )
+                 
+                 # 将曲线写入临时要素类
+                 with arcpy.da.InsertCursor(temp_curves_fc, ["SHAPE@"]) as temp_cursor:
+                     curves_created = 0
+                     for curve in curves:
+                         if curve:
+                             temp_cursor.insertRow([curve])
+                             curves_created += 1
+                 
+                 # 将临时要素类追加到原始要素类
+                 arcpy.Append_management(temp_curves_fc, data_source, "NO_TEST")
+                 arcpy.AddMessage(u"通过临时要素类成功添加了 {0} 条贝塞尔曲线".format(curves_created))
+                 
+                 # 清理临时文件
+                 try:
+                     if arcpy.Exists(temp_curves_fc):
+                         arcpy.Delete_management(temp_curves_fc)
+                 except:
+                     pass
 
-        arcpy.AddMessage(u"贝塞尔曲线创建成功！输出路径: {0}".format(output_fc))
+        arcpy.AddMessage(u"贝塞尔曲线创建成功！已添加到输入要素类中")
 
     except Exception as e:
         arcpy.AddError(u"脚本执行出错: {0}".format(e))

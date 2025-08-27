@@ -94,6 +94,112 @@ def classify_lines_by_slope(lines, tolerance_degrees=30):
         arcpy.AddError(u"classify_lines_by_slope函数执行失败: {0}".format(e))
         return [], []
 
+def classify_lines_by_distance(lines):
+    """基于线段间距离进行CD分组，用于直线连接
+    以第一条线的中点为参考，计算其他线与该线的距离，按距离排序后寻找突变点分组
+    """
+    try:
+        if not lines or len(lines) < 2:
+            arcpy.AddWarning(u"线段数量不足，无法进行距离分组")
+            return [], []
+        
+        arcpy.AddMessage(u"开始基于距离进行CD分组...")
+        
+        # 获取有效线段和中心点
+        valid_lines = []
+        for line in lines:
+            if line and line.centroid:
+                valid_lines.append(line)
+        
+        if len(valid_lines) < 2:
+            arcpy.AddWarning(u"有效线段数量不足，无法进行距离分组")
+            return [], []
+        
+        # 以第一条线为参考线
+        reference_line = valid_lines[0]
+        reference_center = reference_line.centroid
+        
+        # 计算其他线与参考线的距离
+        line_distances = []
+        for i, line in enumerate(valid_lines[1:], 1):  # 从第二条线开始
+            dist = get_distance(reference_center, line.centroid)
+            line_distances.append((dist, i, line))
+        
+        # 按距离排序
+        line_distances.sort()
+        
+        # 寻找距离突变点
+        split_index = find_distance_jump(line_distances)
+        
+        # 根据突变点分组
+        group_c = [reference_line]  # C组包含参考线
+        group_d = []
+        
+        # 将距离较近的线段分到C组，距离较远的分到D组
+        for i, (dist, line_idx, line) in enumerate(line_distances):
+            if i < split_index:
+                group_c.append(line)
+            else:
+                group_d.append(line)
+        
+        # 如果没有找到合适的突变点，使用中位数分割
+        if not group_d:
+            mid_point = len(line_distances) // 2
+            group_c = [reference_line]
+            group_d = []
+            for i, (dist, line_idx, line) in enumerate(line_distances):
+                if i < mid_point:
+                    group_c.append(line)
+                else:
+                    group_d.append(line)
+        
+        # 确保条数多的为D组，条数少的为C组
+        if len(group_c) > len(group_d):
+            arcpy.AddMessage(u"C组线段数({0})>D组线段数({1})，交换C、D组，确保条数多的为D组".format(len(group_c), len(group_d)))
+            group_c, group_d = group_d, group_c
+        
+        arcpy.AddMessage(u"距离分组完成: C组{0}条线，D组{1}条线".format(len(group_c), len(group_d)))
+        
+        return group_c, group_d
+        
+    except Exception as e:
+        arcpy.AddError(u"classify_lines_by_distance函数执行失败: {0}".format(e))
+        return [], []
+
+def find_distance_jump(line_distances):
+    """寻找距离序列中的突变点
+    
+    Args:
+        line_distances: 按距离排序的线段列表 [(distance, index, line), ...]
+    
+    Returns:
+        int: 突变点的索引，用于分组
+    """
+    if len(line_distances) < 2:
+        return 0
+    
+    # 计算相邻距离的差值
+    distance_diffs = []
+    for i in range(1, len(line_distances)):
+        diff = line_distances[i][0] - line_distances[i-1][0]
+        distance_diffs.append(diff)
+    
+    if not distance_diffs:
+        return len(line_distances) // 2
+    
+    # 寻找最大的距离跳跃
+    max_diff = max(distance_diffs)
+    max_diff_index = distance_diffs.index(max_diff)
+    
+    # 只有当最大跳跃显著大于平均跳跃时才认为是突变点
+    avg_diff = sum(distance_diffs) / len(distance_diffs)
+    
+    if max_diff > avg_diff * 2:  # 突变阈值：大于平均值的2倍
+        return max_diff_index + 1
+    else:
+        # 没有明显突变，使用中位数分割
+        return len(line_distances) // 2
+
 def extend_line(line, length=1000):
     """延长线要素"""
     try:
@@ -557,6 +663,175 @@ def create_bezier_curve_with_control_point(start_point, end_point, control_point
         arcpy.AddWarning(u"创建贝塞尔曲线时出错: {0}".format(e))
         return None
 
+def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
+    """
+    在C组和D组线要素之间创建直线连接
+    先确定全局连接方向（C头D尾或C尾D头），然后按坐标排序进行连接
+    """
+    try:
+        lines = []
+        arcpy.AddMessage(u"开始创建C组({0}条)和D组({1}条)之间的直线连接".format(len(group_c), len(group_d)))
+        
+        if not group_c or not group_d:
+            arcpy.AddWarning(u"C组或D组线要素为空，无法创建连接")
+            return lines
+        
+        # 第一步：确定全局连接方向（C头D尾 或 C尾D头）
+        # 随便取第一条C线和第一条D线来判断
+        first_c = group_c[0]
+        first_d = group_d[0]
+        
+        c_start = first_c.firstPoint
+        c_end = first_c.lastPoint
+        d_start = first_d.firstPoint
+        d_end = first_d.lastPoint
+        
+        # 计算两种连接方向的距离
+        c_head_d_tail_distance = get_distance(c_start, d_end)  # C头D尾
+        c_tail_d_head_distance = get_distance(c_end, d_start)  # C尾D头
+        
+        # 确定全局连接方向
+        if c_head_d_tail_distance <= c_tail_d_head_distance:
+            connection_mode = "c_head_d_tail"
+            arcpy.AddMessage(u"确定连接方向：C头连D尾（距离：{0:.2f}）".format(c_head_d_tail_distance))
+        else:
+            connection_mode = "c_tail_d_head"
+            arcpy.AddMessage(u"确定连接方向：C尾连D头（距离：{0:.2f}）".format(c_tail_d_head_distance))
+        
+        # 第二步：根据连接方向对线段进行排序
+        # 根据CD中任意一条线的方向，顺时针转90度的方向作为判断点顺序大小
+        
+        # 选择一条参考线来确定排序方向（优先选择C组第一条线）
+        reference_line = group_c[0] if group_c else group_d[0]
+        ref_start = reference_line.firstPoint
+        ref_end = reference_line.lastPoint
+        
+        # 计算参考线的方向向量
+        line_dx = ref_end.X - ref_start.X
+        line_dy = ref_end.Y - ref_start.Y
+        
+        # 顺时针旋转90度得到垂直方向向量
+        # 原向量(dx, dy) 顺时针旋转90度后变为(dy, -dx)
+        perp_dx = line_dy
+        perp_dy = -line_dx
+        
+        # 归一化垂直向量（避免除零）
+        perp_length = (perp_dx * perp_dx + perp_dy * perp_dy) ** 0.5
+        if perp_length > 0:
+            perp_dx = perp_dx / perp_length
+            perp_dy = perp_dy / perp_length
+        else:
+            # 如果参考线长度为0，使用默认方向
+            perp_dx = 1.0
+            perp_dy = 0.0
+        
+        arcpy.AddMessage(u"参考线方向：({0:.3f}, {1:.3f})，垂直排序方向：({2:.3f}, {3:.3f})".format(
+            line_dx, line_dy, perp_dx, perp_dy))
+        
+        # 根据连接方向确定要排序的端点
+        if connection_mode == "c_head_d_tail":
+            # C头D尾：分析C的头点和D的尾点坐标
+            c_points = [line.firstPoint for line in group_c]
+            d_points = [line.lastPoint for line in group_d]
+        else:
+            # C尾D头：分析C的尾点和D的头点坐标
+            c_points = [line.lastPoint for line in group_c]
+            d_points = [line.firstPoint for line in group_d]
+        
+        # 定义排序函数：计算点在垂直方向上的投影
+        def get_projection_value(point):
+            return point.X * perp_dx + point.Y * perp_dy
+        
+        # 根据连接方向定义排序键函数
+        if connection_mode == "c_head_d_tail":
+            def get_c_key(line):
+                return get_projection_value(line.firstPoint)
+            def get_d_key(line):
+                return get_projection_value(line.lastPoint)
+        else:
+            def get_c_key(line):
+                return get_projection_value(line.lastPoint)
+            def get_d_key(line):
+                return get_projection_value(line.firstPoint)
+        
+        c_lines_sorted = sorted(group_c, key=get_c_key)
+        d_lines_sorted = sorted(group_d, key=get_d_key)
+        arcpy.AddMessage(u"按垂直方向投影排序完成")
+        
+        # 创建剩余线段列表的副本
+        remaining_c = list(c_lines_sorted)
+        remaining_d = list(d_lines_sorted)
+        
+        connection_count = 0
+        
+        # 第三步：按顺序连接，直到C组剩下最后一条线
+        while len(remaining_c) > 1 and len(remaining_d) > 0:
+            connection_count += 1
+            
+            # 取C组和D组的第一条线进行连接
+            line_c = remaining_c[0]
+            line_d = remaining_d[0]
+            
+            # 根据连接方向确定连接点
+            if connection_mode == "c_head_d_tail":
+                end_point = line_c.firstPoint
+                start_point = line_d.lastPoint
+                connection_desc = "D尾连C头"
+            else:
+                start_point = line_c.lastPoint
+                end_point = line_d.firstPoint
+                connection_desc = "C尾连D头"
+            
+            # 创建直线连接
+            try:
+                line_points = [start_point, end_point]
+                straight_line = arcpy.Polyline(arcpy.Array(line_points), spatial_ref)
+                lines.append(straight_line)
+                distance = get_distance(start_point, end_point)
+                arcpy.AddMessage(u"第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
+            except Exception as line_error:
+                arcpy.AddWarning(u"第{0}次连接创建直线时出错: {1}".format(connection_count, line_error))
+            
+            # 移除已连接的线段
+            remaining_c.pop(0)
+            remaining_d.pop(0)
+            arcpy.AddMessage(u"移除已连接线段，C组剩余{0}条，D组剩余{1}条".format(len(remaining_c), len(remaining_d)))
+        
+        # 第四步：C组剩下最后一条线时，与D组所有剩余线按顺序连接
+        if len(remaining_c) == 1 and len(remaining_d) > 0:
+            last_c_line = remaining_c[0]
+            arcpy.AddMessage(u"C组剩余最后1条线，开始与D组剩余{0}条线按顺序连接".format(len(remaining_d)))
+            
+            for i, line_d in enumerate(remaining_d):
+                connection_count += 1
+                
+                # 根据连接方向确定连接点
+                if connection_mode == "c_head_d_tail":
+                    end_point = last_c_line.firstPoint
+                    start_point = line_d.lastPoint
+                    connection_desc = "C头连D尾"
+                else:
+                    start_point = last_c_line.lastPoint
+                    end_point = line_d.firstPoint
+                    connection_desc = "C尾连D头"
+                
+                try:
+                    # 创建直线连接
+                    line_points = [start_point, end_point]
+                    straight_line = arcpy.Polyline(arcpy.Array(line_points), spatial_ref)
+                    lines.append(straight_line)
+                    distance = get_distance(start_point, end_point)
+                    arcpy.AddMessage(u"最后阶段第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
+                except Exception as line_error:
+                    arcpy.AddWarning(u"最后阶段创建直线时出错: {0}".format(line_error))
+        
+        arcpy.AddMessage(u"CD组直线连接完成，成功创建 {0} 条直线".format(len(lines)))
+        return lines
+        
+    except Exception as e:
+        arcpy.AddError(u"create_cross_group_straight_connections函数执行失败: {0}".format(e))
+        return []
+
 if __name__ == '__main__':
     try:
         arcpy.AddMessage(u"脚本开始执行...")
@@ -572,18 +847,25 @@ if __name__ == '__main__':
         output_fc = input_features
         arcpy.AddMessage(u"将在输入要素类中添加贝塞尔曲线")
 
-        arcpy.AddMessage(u"正在获取参数 1 (曲线饱满度)...")
-        fullness_factor = arcpy.GetParameter(1)
-        if fullness_factor is None:
-            raise ValueError(u"曲线饱满度 (参数 1) 未提供。")
-        arcpy.AddMessage(u"参数 1 (曲线饱满度): {}".format(fullness_factor))
+        # 设置默认的曲线参数
+        fullness_factor = 0.5  # 默认曲线饱满度
+        num_points = 20  # 默认曲线平滑度
+        arcpy.AddMessage(u"使用默认曲线参数 - 饱满度: {}, 平滑度: {}".format(fullness_factor, num_points))
 
-        arcpy.AddMessage(u"正在获取参数 2 (曲线平滑度)...")
-        num_points = arcpy.GetParameter(2)
-        if num_points is None or num_points < 2:
-            num_points = 20  # 默认值
-            arcpy.AddWarning(u"曲线平滑度参数无效，使用默认值: {}".format(num_points))
-        arcpy.AddMessage(u"参数 2 (曲线平滑度): {}".format(num_points))
+        arcpy.AddMessage(u"正在获取参数 1 (是否强制直线连接)...")
+        force_straight_connection = arcpy.GetParameter(1)
+        if force_straight_connection is None:
+            force_straight_connection = False  # 默认不勾选，采用智能选取
+            arcpy.AddWarning(u"连接方式参数无效，使用默认值: 智能选取")
+        
+        if force_straight_connection:
+            connection_mode = u"强制直线连接"
+            use_curve_connection = False
+        else:
+            connection_mode = u"智能选取"
+            use_curve_connection = None  # 待智能判断
+        
+        arcpy.AddMessage(u"参数 1 (连接方式): {}".format(connection_mode))
 
         arcpy.AddMessage(u"所有参数获取成功。")
 
@@ -655,13 +937,13 @@ if __name__ == '__main__':
 
         # 读取要素 - 优先处理选择集
         if has_user_selection and len(selection_oids) > 0:
-            arcpy.AddMessage(u"【debug1】使用CopyFeatures方法处理选中要素...")
+            # arcpy.AddMessage(u"【debug1】使用CopyFeatures方法处理选中要素...")
             try:
                 # 创建临时要素类来存储选择集，使用系统临时目录
                 import tempfile
                 temp_dir = tempfile.gettempdir()
                 temp_fc = os.path.join(temp_dir, "temp_selected_features.shp")
-                arcpy.AddMessage(u"【debug】创建临时要素类: {0}".format(temp_fc))
+                # arcpy.AddMessage(u"【debug】创建临时要素类: {0}".format(temp_fc))
                 
                 # 删除可能存在的临时文件
                 if arcpy.Exists(temp_fc):
@@ -669,17 +951,17 @@ if __name__ == '__main__':
                 
                 # 使用CopyFeatures复制选择集到临时要素类
                 arcpy.CopyFeatures_management(input_features, temp_fc)
-                arcpy.AddMessage(u"【debug】CopyFeatures执行成功")
+                # arcpy.AddMessage(u"【debug】CopyFeatures执行成功")
                 
                 # 从临时要素类读取要素
-                arcpy.AddMessage(u"【debug】从临时要素类读取要素...")
+                # arcpy.AddMessage(u"【debug】从临时要素类读取要素...")
                 with arcpy.da.SearchCursor(temp_fc, ["SHAPE@", "OID@"]) as cursor:
-                    arcpy.AddMessage(u"【debug】SearchCursor创建成功，开始遍历...")
+                    # arcpy.AddMessage(u"【debug】SearchCursor创建成功，开始遍历...")
                     for row in cursor:
                         geometry = row[0]
                         oid = row[1]
                         feature_count += 1
-                        arcpy.AddMessage(u"【debug】读取到要素 OID: {0}".format(oid))
+                        # # arcpy.AddMessage(u"【debug】读取到要素 OID: {0}".format(oid))
                         
                         if geometry is not None:
                             try:
@@ -702,7 +984,7 @@ if __name__ == '__main__':
                 try:
                     if arcpy.Exists(temp_fc):
                         arcpy.Delete_management(temp_fc)
-                        arcpy.AddMessage(u"【debug】临时要素类已清理")
+                        # arcpy.AddMessage(u"【debug】临时要素类已清理")
                 except:
                     pass
                     
@@ -727,15 +1009,15 @@ if __name__ == '__main__':
             try:
                 # 优先使用catalogPath，如果不存在则使用input_features
                 data_source = desc.catalogPath if hasattr(desc, 'catalogPath') and desc.catalogPath else input_features
-                arcpy.AddMessage(u"【debug】fallback使用数据源: {0}".format(data_source))
-                arcpy.AddMessage(u"【debug】尝试使用SearchCursor读取所有要素...")
+                # arcpy.AddMessage(u"【debug】fallback使用数据源: {0}".format(data_source))
+                # arcpy.AddMessage(u"【debug】尝试使用SearchCursor读取所有要素...")
                 with arcpy.da.SearchCursor(data_source, ["SHAPE@", "OID@"]) as cursor:
-                    arcpy.AddMessage(u"【debug】SearchCursor创建成功，开始遍历...")
+                    # arcpy.AddMessage(u"【debug】SearchCursor创建成功，开始遍历...")
                     for row in cursor:
                          geometry = row[0]
                          oid = row[1]
                          feature_count += 1
-                         arcpy.AddMessage(u"【debug】读取到要素 OID: {0}".format(oid))
+                         # arcpy.AddMessage(u"【debug】读取到要素 OID: {0}".format(oid))
                          
                          if geometry is not None:
                              try:
@@ -757,7 +1039,7 @@ if __name__ == '__main__':
                 try:
                     alternative_source = input_features if data_source != input_features else desc.catalogPath
                     if alternative_source:
-                        arcpy.AddMessage(u"【debug】尝试使用备用数据源: {0}".format(alternative_source))
+                        # arcpy.AddMessage(u"【debug】尝试使用备用数据源: {0}".format(alternative_source))
                         with arcpy.da.SearchCursor(alternative_source, ["SHAPE@", "OID@"]) as cursor:
                             for row in cursor:
                                 geometry = row[0]
@@ -789,32 +1071,84 @@ if __name__ == '__main__':
             else:
                 raise ValueError(u"输入的 {0} 个要素中没有找到有效线要素。".format(feature_count))
 
-        # 使用斜率容差分类线要素为AB两组
-        arcpy.AddMessage(u"开始按斜率分类线要素...")
-        
-        try:
-            # 按斜率分类线要素
-            group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
+        # 根据连接方式参数选择不同的分组和连接策略
+        if use_curve_connection is None:
+            # 智能选取：先按斜率分类，根据分组结果决定连接方式
+            arcpy.AddMessage(u"采用智能选取方式，开始按斜率分析线要素...")
             
-            if len(group_a) == 0 or len(group_b) == 0:
-                arcpy.AddWarning(u"无法将线要素分为两组，A组: {0} 条，B组: {1} 条".format(len(group_a), len(group_b)))
-                arcpy.AddMessage(u"回退到原有的成对连接方式...")
-                raise Exception(u"线要素分组失败")
-            
-            arcpy.AddMessage(u"成功分组：A组 {0} 条线，B组 {1} 条线".format(len(group_a), len(group_b)))
-            
-            # 创建AB组之间的贝塞尔曲线连接
-            curves = create_cross_group_bezier_connections(
-                group_a, group_b, fullness_factor, num_points, spatial_ref
-            )
-            
-            if not curves or len(curves) == 0:
-                arcpy.AddWarning(u"AB组连接未能创建任何曲线，回退到原有连接方式")
-                raise Exception(u"AB组连接创建曲线失败")
+            try:
+                # 按斜率分类线要素
+                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
                 
-        except Exception as group_error:
-            arcpy.AddWarning(u"AB组连接失败: {0}".format(group_error))
-            arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                if len(group_a) == 0 or len(group_b) == 0:
+                    # 其中一组为0条线，智能选取采用直线连接
+                    arcpy.AddMessage(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
+                    arcpy.AddMessage(u"智能选取判断：采用直线连接方式")
+                    use_curve_connection = False
+                else:
+                    # 两组都有数据，智能选取采用曲线连接
+                    arcpy.AddMessage(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
+                    arcpy.AddMessage(u"智能选取判断：采用曲线连接方式")
+                    use_curve_connection = True
+                    
+            except Exception as classify_error:
+                arcpy.AddWarning(u"斜率分类失败: {0}，默认采用直线连接".format(classify_error))
+                use_curve_connection = False
+        
+        if use_curve_connection:
+            # 曲线连接：使用斜率容差分类线要素为AB两组
+            arcpy.AddMessage(u"执行曲线连接方式，开始按斜率分类线要素...")
+            
+            try:
+                # 按斜率分类线要素
+                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
+                
+                if len(group_a) == 0 or len(group_b) == 0:
+                    arcpy.AddWarning(u"无法将线要素分为两组，A组: {0} 条，B组: {1} 条".format(len(group_a), len(group_b)))
+                    arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                    raise Exception(u"线要素分组失败")
+                
+                arcpy.AddMessage(u"成功分组：A组 {0} 条线，B组 {1} 条线".format(len(group_a), len(group_b)))
+                
+                # 创建AB组之间的贝塞尔曲线连接
+                curves = create_cross_group_bezier_connections(
+                    group_a, group_b, fullness_factor, num_points, spatial_ref
+                )
+                
+                if not curves or len(curves) == 0:
+                    arcpy.AddWarning(u"AB组连接未能创建任何曲线，回退到原有连接方式")
+                    raise Exception(u"AB组连接创建曲线失败")
+                    
+            except Exception as group_error:
+                arcpy.AddWarning(u"AB组连接失败: {0}".format(group_error))
+                arcpy.AddMessage(u"回退到原有的成对连接方式...")
+        else:
+            # 直线连接：使用距离分类线要素为CD两组
+            arcpy.AddMessage(u"执行直线连接方式，开始按距离分类线要素...")
+            
+            try:
+                # 按距离分类线要素
+                group_c, group_d = classify_lines_by_distance(lines)
+                
+                if len(group_c) == 0 or len(group_d) == 0:
+                    arcpy.AddWarning(u"无法将线要素分为两组，C组: {0} 条，D组: {1} 条".format(len(group_c), len(group_d)))
+                    arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                    raise Exception(u"线要素分组失败")
+                
+                arcpy.AddMessage(u"成功分组：C组 {0} 条线，D组 {1} 条线".format(len(group_c), len(group_d)))
+                
+                # 创建CD组之间的直线连接
+                curves = create_cross_group_straight_connections(
+                    group_c, group_d, spatial_ref
+                )
+                
+                if not curves or len(curves) == 0:
+                    arcpy.AddWarning(u"CD组连接未能创建任何直线，回退到原有连接方式")
+                    raise Exception(u"CD组连接创建直线失败")
+                    
+            except Exception as group_error:
+                arcpy.AddWarning(u"CD组连接失败: {0}".format(group_error))
+                arcpy.AddMessage(u"回退到原有的成对连接方式...")
         
         # 将曲线写入输入要素类（使用编辑会话避免锁定问题）
         arcpy.AddMessage(u"开始将贝塞尔曲线写入输入要素类...")
@@ -899,7 +1233,8 @@ if __name__ == '__main__':
                  
                  # 将临时要素类追加到原始要素类
                  arcpy.Append_management(temp_curves_fc, data_source, "NO_TEST")
-                 arcpy.AddMessage(u"通过临时要素类成功添加了 {0} 条贝塞尔曲线".format(curves_created))
+                 connection_type_msg = u"贝塞尔曲线" if use_curve_connection else u"直线连接"
+                 arcpy.AddMessage(u"通过临时要素类成功添加了 {0} 条{1}".format(curves_created, connection_type_msg))
                  
                  # 清理临时文件
                  try:
@@ -908,7 +1243,8 @@ if __name__ == '__main__':
                  except:
                      pass
 
-        arcpy.AddMessage(u"贝塞尔曲线创建成功！已添加到输入要素类中")
+        final_msg = u"贝塞尔曲线创建成功！" if use_curve_connection else u"直线连接创建成功！"
+        arcpy.AddMessage(u"{0}已添加到输入要素类中".format(final_msg))
 
     except Exception as e:
         arcpy.AddError(u"脚本执行出错: {0}".format(e))

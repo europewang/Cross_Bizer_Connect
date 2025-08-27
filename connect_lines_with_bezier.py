@@ -137,6 +137,95 @@ def extend_line(line, length=1000):
         arcpy.AddWarning(u"延长线失败: {0}".format(e))
         return None
 
+def extend_line_from_last_segment(line, length=1000, use_end_segment=True):
+    """基于折线头部或尾部一小段的方向延长线要素
+    
+    Args:
+        line: 输入线要素
+        length: 延长长度
+        use_end_segment: True=使用尾部一小段，False=使用头部一小段
+    """
+    try:
+        if not line or line.pointCount < 2:
+            return None
+        
+        # 获取折线的所有点
+        points = []
+        for part in line:
+            for point in part:
+                points.append(point)
+        
+        if len(points) < 2:
+            return None
+        
+        if use_end_segment:
+            # 使用尾部一小段（最后两个点）
+            last_point = points[len(points)-1]  # 最后一个点
+            second_last_point = points[len(points)-2]  # 倒数第二个点
+            # 打印最后一个点的坐标，保留6位小数
+            arcpy.AddMessage(u"最后一个点坐标: X={:.6f}, Y={:.6f}".format(last_point.X, last_point.Y))
+            # 打印倒数第二个点的坐标，保留6位小数
+            arcpy.AddMessage(u"倒数第二个点坐标: X={:.6f}, Y={:.6f}".format(second_last_point.X, second_last_point.Y))
+
+            # 计算尾部一小段的方向向量
+            dx = last_point.X - second_last_point.X
+            dy = last_point.Y - second_last_point.Y
+            segment_length = math.sqrt(dx * dx + dy * dy)
+            
+            if segment_length == 0:
+                return None
+            
+            # 归一化方向向量
+            unit_dx = dx / segment_length
+            unit_dy = dy / segment_length
+            
+            # 从最后一个点向前延长（基于尾部一小段的方向）
+            extended_x = last_point.X + unit_dx * length
+            extended_y = last_point.Y + unit_dy * length
+            
+            # 创建延长后的线（从倒数第二个点到延长点）
+            start_point = arcpy.Point(second_last_point.X, second_last_point.Y)
+            end_point = arcpy.Point(extended_x, extended_y)
+        else:
+            # 使用头部一小段（前两个点）
+            first_point = points[0]  # 第一个点
+            second_point = points[1]  # 第二个点
+            # 打印最后一个点的坐标，保留6位小数
+            arcpy.AddMessage(u"第一个点坐标: X={:.6f}, Y={:.6f}".format(first_point.X, first_point.Y))
+            # 打印倒数第二个点的坐标，保留6位小数
+            arcpy.AddMessage(u"第二个点坐标: X={:.6f}, Y={:.6f}".format(second_point.X, second_point.Y))
+
+            
+            
+            # 计算头部一小段的方向向量
+            dx = second_point.X - first_point.X
+            dy = second_point.Y - first_point.Y
+            segment_length = math.sqrt(dx * dx + dy * dy)
+            
+            if segment_length == 0:
+                return None
+            
+            # 归一化方向向量
+            unit_dx = dx / segment_length
+            unit_dy = dy / segment_length
+            
+            # 从第一个点向后延长（基于头部一小段的反方向）
+            extended_x = first_point.X - unit_dx * length
+            extended_y = first_point.Y - unit_dy * length
+            
+            # 创建延长后的线（从延长点到第二个点）
+            start_point = arcpy.Point(extended_x, extended_y)
+            end_point = arcpy.Point(second_point.X, second_point.Y)
+        
+        point_array = arcpy.Array([start_point, end_point])
+        extended_line = arcpy.Polyline(point_array, line.spatialReference)
+        
+        return extended_line
+        
+    except Exception as e:
+        arcpy.AddWarning(u"基于线段一小段延长线失败: {0}".format(e))
+        return None
+
 def find_line_intersection(line1, line2):
     """计算两条线的交点"""
     try:
@@ -214,223 +303,6 @@ def create_bezier_from_endpoints(P0, P3, tan_p0_source, tan_p3_source, fullness,
         arcpy.AddWarning(u"创建贝塞尔曲线时出错: {0}".format(e))
         return arcpy.Polyline(arcpy.Array([P0, P3]), spatial_ref)
 
-def get_line_direction_vector(line):
-    """
-    获取线要素的方向向量
-    """
-    try:
-        if not line or line.length == 0:
-            return None
-            
-        start_point = line.firstPoint
-        end_point = line.lastPoint
-        
-        if not start_point or not end_point:
-            return None
-            
-        # 计算方向向量
-        dx = end_point.X - start_point.X
-        dy = end_point.Y - start_point.Y
-        
-        # 归一化
-        length = math.sqrt(dx * dx + dy * dy)
-        if length == 0:
-            return None
-            
-        return (dx / length, dy / length)
-        
-    except Exception as e:
-        arcpy.AddWarning(u"获取线方向向量失败: {0}".format(e))
-        return None
-
-def arrange_lines_by_direction(lines):
-    """
-    按照线的方向排列线要素，确保能够头连尾连接
-    返回: (arranged_lines, failed_lines) - 成功排列的线和无法连接的线
-    """
-    try:
-        if len(lines) < 2:
-            return lines, []
-        
-        arranged = [lines[0]]  # 从第一条线开始
-        remaining = lines[1:]
-        failed_lines = []
-        
-        arcpy.AddMessage(u"开始按方向排列线要素，总共 {0} 条线".format(len(lines)))
-        
-        while remaining:
-            current_line = arranged[-1]
-            
-            # 安全地获取当前线的终点
-            try:
-                current_end = current_line.lastPoint
-                if not current_end:
-                    arcpy.AddWarning(u"当前线的终点为空，跳过剩余连接")
-                    failed_lines.extend(remaining)
-                    break
-            except Exception as e:
-                arcpy.AddWarning(u"获取当前线终点失败: {0}".format(e))
-                failed_lines.extend(remaining)
-                break
-            
-            # 寻找能够连接到当前线尾部的线
-            best_match = None
-            best_distance = float('inf')
-            best_index = -1
-            best_reversed = False
-            
-            for i, candidate_line in enumerate(remaining):
-                try:
-                    candidate_start = candidate_line.firstPoint
-                    candidate_end = candidate_line.lastPoint
-                    
-                    if not candidate_start or not candidate_end:
-                        arcpy.AddWarning(u"候选线 {0} 的端点为空，跳过".format(i))
-                        continue
-                    
-                    # 检查候选线的起点是否接近当前线的终点（正向连接）
-                    dist_to_start = get_distance(current_end, candidate_start)
-                    # 检查候选线的终点是否接近当前线的终点（反向连接）
-                    dist_to_end = get_distance(current_end, candidate_end)
-                    
-                    # 选择距离更近的连接方式
-                    if dist_to_start < best_distance:
-                        best_match = candidate_line
-                        best_distance = dist_to_start
-                        best_index = i
-                        best_reversed = False
-                    
-                    if dist_to_end < best_distance:
-                        best_match = candidate_line
-                        best_distance = dist_to_end
-                        best_index = i
-                        best_reversed = True
-                        
-                except Exception as e:
-                    arcpy.AddWarning(u"处理候选线 {0} 时出错: {1}".format(i, e))
-                    continue
-            
-            # 如果找到了合适的连接线
-            if best_match and best_distance < 1000:  # 设置一个合理的距离阈值
-                try:
-                    if best_reversed:
-                        arcpy.AddMessage(u"线要素需要反向以实现头尾连接，距离: {0:.2f}".format(best_distance))
-                    else:
-                        arcpy.AddMessage(u"线要素正向连接，距离: {0:.2f}".format(best_distance))
-                    
-                    arranged.append(best_match)
-                    remaining.pop(best_index)
-                    arcpy.AddMessage(u"成功连接线要素，剩余 {0} 条线".format(len(remaining)))
-                except Exception as e:
-                    arcpy.AddWarning(u"添加连接线时出错: {0}".format(e))
-                    failed_lines.extend(remaining)
-                    break
-            else:
-                # 无法找到合适的连接线，将剩余的线标记为失败
-                arcpy.AddWarning(u"无法为当前线找到合适的头尾连接（最近距离: {0:.2f}），剩余 {1} 条线无法连接".format(best_distance, len(remaining)))
-                failed_lines.extend(remaining)
-                break
-        
-        arcpy.AddMessage(u"线要素排列完成：成功排列 {0} 条，失败 {1} 条".format(len(arranged), len(failed_lines)))
-        return arranged, failed_lines
-        
-    except Exception as e:
-        arcpy.AddError(u"arrange_lines_by_direction函数执行失败: {0}".format(e))
-        import traceback
-        arcpy.AddError(traceback.format_exc())
-        return lines[:1] if lines else [], lines[1:] if len(lines) > 1 else []
-
-def create_directional_bezier_connections(lines, fullness_factor, num_points, spatial_ref):
-    """
-    按照线的方向创建头尾连接的贝塞尔曲线
-    """
-    try:
-        if len(lines) < 2:
-            arcpy.AddWarning(u"线要素数量不足，无法创建连接")
-            return []
-        
-        curves = []
-        arcpy.AddMessage(u"开始创建 {0} 条线之间的方向性贝塞尔曲线连接".format(len(lines)))
-        
-        for i in range(len(lines) - 1):
-            try:
-                current_line = lines[i]
-                next_line = lines[i + 1]
-                
-                # 安全地获取线的端点
-                try:
-                    current_end = current_line.lastPoint
-                    current_start = current_line.firstPoint
-                    next_start = next_line.firstPoint
-                    next_end = next_line.lastPoint
-                    
-                    if not all([current_end, current_start, next_start, next_end]):
-                        arcpy.AddWarning(u"线{0}或线{1}的端点为空，跳过连接".format(i+1, i+2))
-                        continue
-                        
-                except Exception as e:
-                    arcpy.AddWarning(u"获取线{0}或线{1}的端点失败: {2}".format(i+1, i+2, e))
-                    continue
-                
-                # 检查连接距离
-                try:
-                    connection_distance = get_distance(current_end, next_start)
-                    reverse_distance = get_distance(current_end, next_end)
-                    
-                    arcpy.AddMessage(u"线{0}到线{1}: 正向距离={2:.2f}, 反向距离={3:.2f}".format(
-                        i+1, i+2, connection_distance, reverse_distance))
-                        
-                except Exception as e:
-                    arcpy.AddWarning(u"计算线{0}到线{1}的连接距离失败: {2}".format(i+1, i+2, e))
-                    continue
-                
-                if reverse_distance < connection_distance:
-                    # 使用反向连接（当前线尾连接下一条线尾）
-                    start_point = current_end
-                    end_point = next_end
-                    # 计算切线方向
-                    current_tangent = current_start  # 当前线的起点作为切线参考
-                    next_tangent = next_start  # 下一条线的起点作为切线参考
-                    arcpy.AddMessage(u"使用反向连接: 线{0}尾 -> 线{1}尾，距离: {2:.2f}".format(i+1, i+2, reverse_distance))
-                else:
-                    # 使用正向连接（当前线尾连接下一条线头）
-                    start_point = current_end
-                    end_point = next_start
-                    # 计算切线方向
-                    current_tangent = current_start  # 当前线的起点作为切线参考
-                    next_tangent = next_end  # 下一条线的终点作为切线参考
-                    arcpy.AddMessage(u"使用正向连接: 线{0}尾 -> 线{1}头，距离: {2:.2f}".format(i+1, i+2, connection_distance))
-                
-                # 创建贝塞尔曲线
-                try:
-                    curve = create_bezier_from_endpoints(
-                        start_point, end_point, 
-                        current_tangent, next_tangent,
-                        fullness_factor, num_points, spatial_ref
-                    )
-                    if curve:
-                        curves.append(curve)
-                        arcpy.AddMessage(u"成功创建线{0}到线{1}的方向性贝塞尔曲线".format(i+1, i+2))
-                    else:
-                        arcpy.AddWarning(u"线{0}到线{1}的贝塞尔曲线创建返回空值".format(i+1, i+2))
-                except Exception as e:
-                    arcpy.AddWarning(u"创建线{0}到线{1}的贝塞尔曲线失败: {2}".format(i+1, i+2, e))
-                    import traceback
-                    arcpy.AddWarning(traceback.format_exc())
-                    
-            except Exception as e:
-                arcpy.AddWarning(u"处理线{0}到线{1}的连接时出错: {2}".format(i+1, i+2, e))
-                continue
-        
-        arcpy.AddMessage(u"方向性贝塞尔曲线创建完成，成功创建 {0} 条曲线".format(len(curves)))
-        return curves
-        
-    except Exception as e:
-        arcpy.AddError(u"create_directional_bezier_connections函数执行失败: {0}".format(e))
-        import traceback
-        arcpy.AddError(traceback.format_exc())
-        return []
-
 def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num_points, spatial_ref):
     """
     在A组和B组线要素之间创建贝塞尔曲线连接
@@ -505,10 +377,15 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                     arcpy.AddMessage(u"第{0}次连接：强制连接最近点对".format(connection_count))
                 
                 if connection_valid and curve_start and curve_end:
-                    # 延长两条线并找到交点作为控制点
+                    # 基于折线头部或尾部一小段延长两条线并找到交点作为控制点
                     try:
-                        extended_a = extend_line(a_line, length=1000)
-                        extended_b = extend_line(b_line, length=1000)
+                        # 根据连接的端点类型判断使用头部还是尾部一小段
+                        # 如果连接的是线的起点，使用头部一小段；如果连接的是终点，使用尾部一小段
+                        use_end_segment_a = (a_type == 'a_end')  # A线终点连接时使用尾部一小段
+                        use_end_segment_b = (b_type == 'b_end')  # B线终点连接时使用尾部一小段
+                        
+                        extended_a = extend_line_from_last_segment(a_line, length=1000, use_end_segment=use_end_segment_a)
+                        extended_b = extend_line_from_last_segment(b_line, length=1000, use_end_segment=use_end_segment_b)
                         
                         if extended_a and extended_b:
                             intersection = find_line_intersection(extended_a, extended_b)
@@ -522,7 +399,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                                 
                                 if curve:
                                     curves.append(curve)
-                                    arcpy.AddMessage(u"成功创建第{0}条贝塞尔曲线，使用延长线交点作为控制点".format(connection_count))
+                                    arcpy.AddMessage(u"成功创建第{0}条贝塞尔曲线，使用折线最后一小段延长线交点作为控制点".format(connection_count))
                                 else:
                                     arcpy.AddWarning(u"第{0}条贝塞尔曲线创建失败".format(connection_count))
                             else:
@@ -603,8 +480,12 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                     else:
                         arcpy.AddMessage(u"最后阶段第{0}次连接：A组线终点连接B组线{1}起点".format(connection_count, i+1))
                     try:
-                        extended_a = extend_line(last_a_line, length=1000)
-                        extended_b = extend_line(line_b, length=1000)
+                        # 根据连接的端点类型判断使用头部还是尾部一小段
+                        use_end_segment_a = (closest_a_type == 'a_end')  # A线终点连接时使用尾部一小段
+                        use_end_segment_b = (closest_b_type == 'b_end')  # B线终点连接时使用尾部一小段
+                        
+                        extended_a = extend_line_from_last_segment(last_a_line, length=1000, use_end_segment=use_end_segment_a)
+                        extended_b = extend_line_from_last_segment(line_b, length=1000, use_end_segment=use_end_segment_b)
                         
                         if extended_a and extended_b:
                             intersection = find_line_intersection(extended_a, extended_b)

@@ -28,7 +28,7 @@ def angle_difference(angle1, angle2):
     diff = abs(angle1 - angle2)
     return min(diff, 2 * math.pi - diff)
 
-def classify_lines_by_slope(lines, tolerance_degrees=30):
+def classify_lines_by_slope(lines, tolerance_degrees):
     """按斜率将线要素分为两组"""
     try:
         if not lines or len(lines) < 2:
@@ -417,14 +417,267 @@ def create_bezier_from_endpoints(P0, P3, tan_p0_source, tan_p3_source, fullness,
         arcpy.AddWarning(u"创建贝塞尔曲线时出错: {0}".format(e))
         return arcpy.Polyline(arcpy.Array([P0, P3]), spatial_ref)
 
-def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num_points, spatial_ref):
+def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num_points, spatial_ref, connection_type="智能连接"):
     """
     在A组和B组线要素之间创建贝塞尔曲线连接
-    新逻辑：循环找最近点对生成贝塞尔曲线，直到A组剩最后一条线时与B组所有剩余线全连接
+    根据连接方案类型采用不同策略：
+    - 手动选择（曲线连接）：模仿直线连接的排序方法，按坐标排序进行连接
+    - 智能选择：按现有判断方法，找最近点对进行连接
     """
     try:
         curves = []
         arcpy.AddMessage(u"开始创建A组({0}条)和B组({1}条)之间的贝塞尔曲线连接".format(len(group_a), len(group_b)))
+        
+        if not group_a or not group_b:
+            arcpy.AddWarning(u"A组或B组为空，无法创建连接")
+            return []
+        
+        # 第一步：确定连接方向
+        # 随机选择A组第一条线和B组第一条线，比较A头-B尾距离和A尾-B头距离
+        sample_a = group_a[0]
+        sample_b = group_b[0]
+        
+        a_head = sample_a.firstPoint
+        a_tail = sample_a.lastPoint
+        b_head = sample_b.firstPoint
+        b_tail = sample_b.lastPoint
+        
+        # 计算两种连接方向的距离
+        a_head_b_tail_distance = get_distance(a_head, b_tail)
+        a_tail_b_head_distance = get_distance(a_tail, b_head)
+        
+        # 确定连接方向
+        if a_head_b_tail_distance <= a_tail_b_head_distance:
+            connection_mode = "a_head_b_tail"
+            log_message(u"确定连接方向：A头连B尾（距离：{0:.2f}）".format(a_head_b_tail_distance))
+        else:
+            connection_mode = "a_tail_b_head"
+            log_message(u"确定连接方向：A尾连B头（距离：{0:.2f}）".format(a_tail_b_head_distance))
+        
+        # 根据连接类型选择不同的连接策略
+        if connection_type == u"曲线连接":
+            # 手动选择曲线连接：模仿直线连接的排序方法
+            log_message(u"采用手动曲线连接模式，按坐标排序进行连接")
+            return create_bezier_connections_by_sorting(group_a, group_b, connection_mode, fullness_factor, num_points, spatial_ref)
+        else:
+            # 智能连接：按现有判断方法，找最近点对进行连接
+            log_message(u"采用智能连接模式，按最近点对进行连接")
+            return create_bezier_connections_by_nearest(group_a, group_b, connection_mode, fullness_factor, num_points, spatial_ref)
+        
+
+        
+    except Exception as e:
+        arcpy.AddError(u"create_cross_group_bezier_connections函数执行失败: {0}".format(e))
+        return []
+
+def create_bezier_connections_by_sorting(group_a, group_b, connection_mode, fullness_factor, num_points, spatial_ref):
+    """
+    按坐标排序进行贝塞尔曲线连接（模仿直线连接的排序方法）
+    """
+    try:
+        curves = []
+        
+        # 计算预期连接数量用于进度显示
+        expected_connections = min(len(group_a), len(group_b))
+        
+        # 第二步：根据连接方向对线段进行排序
+        # 根据AB中任意一条线的方向，顺时针转90度的方向作为判断点顺序大小
+        
+        # 选择一条参考线来确定排序方向（优先选择A组第一条线）
+        reference_line = group_a[0] if group_a else group_b[0]
+        ref_start = reference_line.firstPoint
+        ref_end = reference_line.lastPoint
+        
+        # 计算参考线的方向向量
+        line_dx = ref_end.X - ref_start.X
+        line_dy = ref_end.Y - ref_start.Y
+        
+        # 顺时针旋转90度得到垂直方向向量
+        # 原向量(dx, dy) 顺时针旋转90度后变为(dy, -dx)
+        perp_dx = line_dy
+        perp_dy = -line_dx
+        
+        # 归一化垂直向量（避免除零）
+        perp_length = (perp_dx * perp_dx + perp_dy * perp_dy) ** 0.5
+        if perp_length > 0:
+            perp_dx = perp_dx / perp_length
+            perp_dy = perp_dy / perp_length
+        else:
+            # 如果参考线长度为0，使用默认方向
+            perp_dx = 1.0
+            perp_dy = 0.0
+        
+        log_message(u"参考线方向：({0:.3f}, {1:.3f})，垂直排序方向：({2:.3f}, {3:.3f})".format(
+            line_dx, line_dy, perp_dx, perp_dy))
+        
+        # 定义排序函数：计算点在垂直方向上的投影
+        def get_projection_value(point):
+            return point.X * perp_dx + point.Y * perp_dy
+        
+        # 根据连接方向定义排序键函数
+        if connection_mode == "a_head_b_tail":
+            def get_a_key(line):
+                return get_projection_value(line.firstPoint)
+            def get_b_key(line):
+                return get_projection_value(line.lastPoint)
+        else:
+            def get_a_key(line):
+                return get_projection_value(line.lastPoint)
+            def get_b_key(line):
+                return get_projection_value(line.firstPoint)
+        
+        a_lines_sorted = sorted(group_a, key=get_a_key)
+        b_lines_sorted = sorted(group_b, key=get_b_key)
+        log_message(u"按垂直方向投影排序完成")
+        
+        # 创建剩余线段列表的副本
+        remaining_a = list(a_lines_sorted)
+        remaining_b = list(b_lines_sorted)
+        
+        connection_count = 0
+        
+        # 第三步：按顺序连接，直到A组剩下最后一条线
+        while len(remaining_a) > 1 and len(remaining_b) > 0:
+            connection_count += 1
+            
+            # 取A组和B组的第一条线进行连接
+            line_a = remaining_a[0]
+            line_b = remaining_b[0]
+            
+            # 根据连接方向确定连接点
+            if connection_mode == "a_head_b_tail":
+                curve_start = line_a.firstPoint
+                curve_end = line_b.lastPoint
+                a_type = 'a_start'
+                b_type = 'b_end'
+                connection_desc = "A头连B尾"
+            else:
+                curve_start = line_b.firstPoint
+                curve_end = line_a.lastPoint
+                a_type = 'a_end'
+                b_type = 'b_start'
+                connection_desc = "B头连A尾"
+            
+            # 创建贝塞尔曲线连接
+            try:
+                # 根据连接的端点类型判断使用头部还是尾部一小段
+                use_end_segment_a = (a_type == 'a_end')
+                use_end_segment_b = (b_type == 'b_end')
+                
+                extended_a = extend_line_from_last_segment(line_a, length=1000, use_end_segment=use_end_segment_a)
+                extended_b = extend_line_from_last_segment(line_b, length=1000, use_end_segment=use_end_segment_b)
+                
+                if extended_a and extended_b:
+                    intersection = find_line_intersection(extended_a, extended_b)
+                    
+                    if intersection:
+                        curve = create_bezier_curve_with_control_point(
+                            curve_start, curve_end, intersection, 
+                            fullness_factor, num_points, spatial_ref
+                        )
+                    else:
+                        # 使用中点作为控制点
+                        mid_x = (curve_start.X + curve_end.X) / 2
+                        mid_y = (curve_start.Y + curve_end.Y) / 2
+                        mid_point = arcpy.Point(mid_x, mid_y)
+                        
+                        curve = create_bezier_curve_with_control_point(
+                            curve_start, curve_end, mid_point,
+                            fullness_factor, num_points, spatial_ref
+                        )
+                    
+                    if curve:
+                        curves.append(curve)
+                        distance = get_distance(curve_start, curve_end)
+                        progress = int((connection_count / max(expected_connections, 1)) * 100)
+                        arcpy.AddMessage(u"[4/5] 进度 {0}% - 第{1}次连接：{2}（距离：{3:.2f}）".format(progress, connection_count, connection_desc, distance))
+                    else:
+                        arcpy.AddWarning(u"第{0}次连接：贝塞尔曲线创建失败".format(connection_count))
+                else:
+                    arcpy.AddWarning(u"第{0}次连接：线延长失败".format(connection_count))
+                    
+            except Exception as curve_error:
+                arcpy.AddWarning(u"第{0}次连接创建贝塞尔曲线时出错: {1}".format(connection_count, curve_error))
+            
+            # 移除已连接的线段
+            remaining_a.pop(0)
+            remaining_b.pop(0)
+            log_message(u"移除已连接线段，A组剩余{0}条，B组剩余{1}条".format(len(remaining_a), len(remaining_b)))
+        
+        # 第四步：A组剩下最后一条线时，与B组所有剩余线按顺序连接
+        if len(remaining_a) == 1 and len(remaining_b) > 0:
+            last_a_line = remaining_a[0]
+            log_message(u"A组剩余最后1条线，开始与B组剩余{0}条线按顺序连接".format(len(remaining_b)))
+            
+            for i, line_b in enumerate(remaining_b):
+                connection_count += 1
+                
+                # 根据连接方向确定连接点
+                if connection_mode == "a_head_b_tail":
+                    curve_start = last_a_line.firstPoint
+                    curve_end = line_b.lastPoint
+                    a_type = 'a_start'
+                    b_type = 'b_end'
+                    connection_desc = "A头连B尾"
+                else:
+                    curve_start = line_b.firstPoint
+                    curve_end = last_a_line.lastPoint
+                    a_type = 'a_end'
+                    b_type = 'b_start'
+                    connection_desc = "B头连A尾"
+                
+                try:
+                    # 根据连接的端点类型判断使用头部还是尾部一小段
+                    use_end_segment_a = (a_type == 'a_end')
+                    use_end_segment_b = (b_type == 'b_end')
+                    
+                    extended_a = extend_line_from_last_segment(last_a_line, length=1000, use_end_segment=use_end_segment_a)
+                    extended_b = extend_line_from_last_segment(line_b, length=1000, use_end_segment=use_end_segment_b)
+                    
+                    if extended_a and extended_b:
+                        intersection = find_line_intersection(extended_a, extended_b)
+                        
+                        if intersection:
+                            curve = create_bezier_curve_with_control_point(
+                                curve_start, curve_end, intersection, 
+                                fullness_factor, num_points, spatial_ref
+                            )
+                        else:
+                            # 使用中点作为控制点
+                            mid_x = (curve_start.X + curve_end.X) / 2
+                            mid_y = (curve_start.Y + curve_end.Y) / 2
+                            mid_point = arcpy.Point(mid_x, mid_y)
+                            
+                            curve = create_bezier_curve_with_control_point(
+                                curve_start, curve_end, mid_point,
+                                fullness_factor, num_points, spatial_ref
+                            )
+                        
+                        if curve:
+                            curves.append(curve)
+                            distance = get_distance(curve_start, curve_end)
+                            log_message(u"最后阶段第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
+                        else:
+                            arcpy.AddWarning(u"最后阶段：第{0}条贝塞尔曲线创建失败".format(connection_count))
+                    else:
+                        arcpy.AddWarning(u"最后阶段：线延长失败")
+                        
+                except Exception as curve_error:
+                    arcpy.AddWarning(u"最后阶段创建贝塞尔曲线时出错: {0}".format(curve_error))
+        
+        arcpy.AddMessage(u"AB组贝塞尔曲线连接完成（排序模式），成功创建 {0} 条曲线".format(len(curves)))
+        return curves
+        
+    except Exception as e:
+        arcpy.AddError(u"create_bezier_connections_by_sorting函数执行失败: {0}".format(e))
+        return []
+
+def create_bezier_connections_by_nearest(group_a, group_b, connection_mode, fullness_factor, num_points, spatial_ref):
+    """
+    按最近点对进行贝塞尔曲线连接（原有的智能连接逻辑）
+    """
+    try:
+        curves = []
         
         # 计算预期连接数量用于进度显示
         expected_connections = min(len(group_a), len(group_b)) + max(0, len(group_b) - 1) if len(group_a) == 1 else min(len(group_a) - 1, len(group_b))
@@ -437,7 +690,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
         
         # 循环连接，直到A组剩下最后一条线
         while len(remaining_a) > 1 and len(remaining_b) > 0:
-            # 找到A组和B组中距离最近的两个端点
+            # 根据确定的连接方向找最近点对
             min_distance = float('inf')
             best_connection = None
             best_a_idx = -1
@@ -445,25 +698,25 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
             
             for i, line_a in enumerate(remaining_a):
                 for j, line_b in enumerate(remaining_b):
-                    # 收集A线和B线的所有端点
-                    a_points = [
-                        (line_a.firstPoint, 'a_start', line_a),
-                        (line_a.lastPoint, 'a_end', line_a)
-                    ]
-                    b_points = [
-                        (line_b.firstPoint, 'b_start', line_b),
-                        (line_b.lastPoint, 'b_end', line_b)
-                    ]
+                    if connection_mode == "a_head_b_tail":
+                        # A头连B尾
+                        a_point = line_a.firstPoint
+                        b_point = line_b.lastPoint
+                        a_type = 'a_start'
+                        b_type = 'b_end'
+                    else:
+                        # A尾连B头
+                        a_point = line_a.lastPoint
+                        b_point = line_b.firstPoint
+                        a_type = 'a_end'
+                        b_type = 'b_start'
                     
-                    # 找到所有端点中距离最近的两个点
-                    for a_point, a_type, a_line in a_points:
-                        for b_point, b_type, b_line in b_points:
-                            distance = get_distance(a_point, b_point)
-                            if distance < min_distance:
-                                min_distance = distance
-                                best_connection = (a_point, b_point, a_type, b_type, a_line, b_line)
-                                best_a_idx = i
-                                best_b_idx = j
+                    distance = get_distance(a_point, b_point)
+                    if distance < min_distance:
+                        min_distance = distance
+                        best_connection = (a_point, b_point, a_type, b_type, line_a, line_b)
+                        best_a_idx = i
+                        best_b_idx = j
             
             if best_connection:
                 a_point, b_point, a_type, b_type, a_line, b_line = best_connection
@@ -511,19 +764,12 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                             intersection = find_line_intersection(extended_a, extended_b)
                             
                             if intersection:
-                                # 使用交点作为控制点创建贝塞尔曲线
                                 curve = create_bezier_curve_with_control_point(
                                     curve_start, curve_end, intersection, 
                                     fullness_factor, num_points, spatial_ref
                                 )
-                                
-                                if curve:
-                                    curves.append(curve)
-                                    log_message(u"成功创建第{0}条贝塞尔曲线，使用折线最后一小段延长线交点作为控制点".format(connection_count))
-                                else:
-                                    arcpy.AddWarning(u"第{0}条贝塞尔曲线创建失败".format(connection_count))
                             else:
-                                # 如果没有交点，使用中点作为控制点
+                                # 使用中点作为控制点
                                 mid_x = (curve_start.X + curve_end.X) / 2
                                 mid_y = (curve_start.Y + curve_end.Y) / 2
                                 mid_point = arcpy.Point(mid_x, mid_y)
@@ -532,12 +778,12 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                                     curve_start, curve_end, mid_point,
                                     fullness_factor, num_points, spatial_ref
                                 )
-                                
-                                if curve:
-                                    curves.append(curve)
-                                    log_message(u"第{0}条贝塞尔曲线使用中点作为控制点创建成功".format(connection_count))
-                        else:
-                            arcpy.AddWarning(u"第{0}次连接：线延长失败".format(connection_count))
+                            
+                            if curve:
+                                curves.append(curve)
+                                log_message(u"第{0}条贝塞尔曲线创建成功".format(connection_count))
+                            else:
+                                arcpy.AddWarning(u"第{0}次连接：贝塞尔曲线创建失败".format(connection_count))
                             
                     except Exception as curve_error:
                         arcpy.AddWarning(u"第{0}次连接创建贝塞尔曲线时出错: {1}".format(connection_count, curve_error))
@@ -558,94 +804,69 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
             for i, line_b in enumerate(remaining_b):
                 connection_count += 1
                 
-                # 找到A线和B线的最近点对
-                a_points = [
-                    (last_a_line.firstPoint, 'a_start'),
-                    (last_a_line.lastPoint, 'a_end')
-                ]
-                b_points = [
-                    (line_b.firstPoint, 'b_start'),
-                    (line_b.lastPoint, 'b_end')
-                ]
-                
-                # 先找到最近的点对
-                min_distance = float('inf')
-                closest_a_point = None
-                closest_b_point = None
-                closest_a_type = None
-                closest_b_type = None
-                
-                for a_point, a_type in a_points:
-                    for b_point, b_type in b_points:
-                        distance = get_distance(a_point, b_point)
-                        if distance < min_distance:
-                            min_distance = distance
-                            closest_a_point = a_point
-                            closest_b_point = b_point
-                            closest_a_type = a_type
-                            closest_b_type = b_type
-                
-                # 判断最近点对是否符合头尾相连原则
-                best_connection = None
-                if (closest_a_type == 'a_start' and closest_b_type == 'b_end') or (closest_a_type == 'a_end' and closest_b_type == 'b_start'):
-                    if closest_a_type == 'a_start' and closest_b_type == 'b_end':
-                        best_connection = (closest_a_point, closest_b_point, 'a_start_b_end')
-                    elif closest_a_type == 'a_end' and closest_b_type == 'b_start':
-                        best_connection = (closest_b_point, closest_a_point, 'b_start_a_end')
-                
-                if best_connection:
-                    best_a_point, best_b_point, connection_type = best_connection
-                    if connection_type == 'a_start_b_end':
-                        log_message(u"最后阶段第{0}次连接：A组线起点连接B组线{1}终点".format(connection_count, i+1))
-                    else:
-                        log_message(u"最后阶段第{0}次连接：A组线终点连接B组线{1}起点".format(connection_count, i+1))
-                    try:
-                        # 根据连接的端点类型判断使用头部还是尾部一小段
-                        use_end_segment_a = (closest_a_type == 'a_end')  # A线终点连接时使用尾部一小段
-                        use_end_segment_b = (closest_b_type == 'b_end')  # B线终点连接时使用尾部一小段
-                        
-                        extended_a = extend_line_from_last_segment(last_a_line, length=1000, use_end_segment=use_end_segment_a)
-                        extended_b = extend_line_from_last_segment(line_b, length=1000, use_end_segment=use_end_segment_b)
-                        
-                        if extended_a and extended_b:
-                            intersection = find_line_intersection(extended_a, extended_b)
-                            
-                            if intersection:
-                                curve = create_bezier_curve_with_control_point(
-                                    best_a_point, best_b_point, intersection, 
-                                    fullness_factor, num_points, spatial_ref
-                                )
-                            else:
-                                # 使用中点作为控制点
-                                mid_x = (best_a_point.X + best_b_point.X) / 2
-                                mid_y = (best_a_point.Y + best_b_point.Y) / 2
-                                mid_point = arcpy.Point(mid_x, mid_y)
-                                
-                                curve = create_bezier_curve_with_control_point(
-                                    best_a_point, best_b_point, mid_point,
-                                    fullness_factor, num_points, spatial_ref
-                                )
-                            
-                            if curve:
-                                curves.append(curve)
-                                log_message(u"最后阶段：成功创建第{0}条贝塞尔曲线（A线与B组第{1}条线连接）".format(connection_count, i+1))
-                            else:
-                                arcpy.AddWarning(u"最后阶段：第{0}条贝塞尔曲线创建失败".format(connection_count))
-                        else:
-                            arcpy.AddWarning(u"最后阶段：线延长失败")
-                            
-                    except Exception as curve_error:
-                        arcpy.AddWarning(u"最后阶段创建贝塞尔曲线时出错: {0}".format(curve_error))
+                # 根据确定的连接方向找最近点对
+                if connection_mode == "a_head_b_tail":
+                    # A头连B尾
+                    a_point = last_a_line.firstPoint
+                    b_point = line_b.lastPoint
+                    a_type = 'a_start'
+                    b_type = 'b_end'
+                    curve_start = a_point
+                    curve_end = b_point
+                    log_message(u"最后阶段第{0}次连接：A组线起点连接B组线{1}终点".format(connection_count, i+1))
                 else:
-                    # 如果没有符合头尾相连原则的连接，跳过这条线
-                    arcpy.AddWarning(u"最后阶段：A组线与B组第{0}条线没有符合头尾相连原则的连接点，跳过".format(i+1))
-                    continue
+                    # A尾连B头
+                    a_point = last_a_line.lastPoint
+                    b_point = line_b.firstPoint
+                    a_type = 'a_end'
+                    b_type = 'b_start'
+                    curve_start = b_point
+                    curve_end = a_point
+                    log_message(u"最后阶段第{0}次连接：B组线{1}起点连接A组线终点".format(connection_count, i+1))
+                
+                try:
+                    # 根据连接的端点类型判断使用头部还是尾部一小段
+                    use_end_segment_a = (a_type == 'a_end')
+                    use_end_segment_b = (b_type == 'b_end')
+                    
+                    extended_a = extend_line_from_last_segment(last_a_line, length=1000, use_end_segment=use_end_segment_a)
+                    extended_b = extend_line_from_last_segment(line_b, length=1000, use_end_segment=use_end_segment_b)
+                    
+                    if extended_a and extended_b:
+                        intersection = find_line_intersection(extended_a, extended_b)
+                        
+                        if intersection:
+                            curve = create_bezier_curve_with_control_point(
+                                curve_start, curve_end, intersection, 
+                                fullness_factor, num_points, spatial_ref
+                            )
+                        else:
+                            # 使用中点作为控制点
+                            mid_x = (curve_start.X + curve_end.X) / 2
+                            mid_y = (curve_start.Y + curve_end.Y) / 2
+                            mid_point = arcpy.Point(mid_x, mid_y)
+                            
+                            curve = create_bezier_curve_with_control_point(
+                                curve_start, curve_end, mid_point,
+                                fullness_factor, num_points, spatial_ref
+                            )
+                        
+                        if curve:
+                            curves.append(curve)
+                            log_message(u"最后阶段：成功创建第{0}条贝塞尔曲线（A线与B组第{1}条线连接）".format(connection_count, i+1))
+                        else:
+                            arcpy.AddWarning(u"最后阶段：第{0}条贝塞尔曲线创建失败".format(connection_count))
+                    else:
+                        arcpy.AddWarning(u"最后阶段：线延长失败")
+                        
+                except Exception as curve_error:
+                    arcpy.AddWarning(u"最后阶段创建贝塞尔曲线时出错: {0}".format(curve_error))
         
-        arcpy.AddMessage(u"AB组贝塞尔曲线连接完成，成功创建 {0} 条曲线".format(len(curves)))
+        arcpy.AddMessage(u"AB组贝塞尔曲线连接完成（最近点模式），成功创建 {0} 条曲线".format(len(curves)))
         return curves
         
     except Exception as e:
-        arcpy.AddError(u"create_cross_group_bezier_connections函数执行失败: {0}".format(e))
+        arcpy.AddError(u"create_bezier_connections_by_nearest函数执行失败: {0}".format(e))
         return []
 
 def create_bezier_curve_with_control_point(start_point, end_point, control_point, fullness_factor, num_points, spatial_ref):
@@ -1105,7 +1326,7 @@ if __name__ == '__main__':
             arcpy.AddMessage(u"[3/5] 采用智能连接方式，开始按斜率分析线要素...")
             
             try:
-                # 按斜率分类线要素
+                # 按斜率分类线要素（智能连接使用30度容差）
                 group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
                 
                 if len(group_a) == 0 or len(group_b) == 0:
@@ -1128,8 +1349,8 @@ if __name__ == '__main__':
             arcpy.AddMessage(u"[3/5] 执行曲线连接方式，开始按斜率分类线要素...")
             
             try:
-                # 按斜率分类线要素
-                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
+                # 按斜率分类线要素（曲线连接使用5度容差）
+                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=5)
                 
                 if len(group_a) == 0 or len(group_b) == 0:
                     arcpy.AddWarning(u"无法将线要素分为两组，A组: {0} 条，B组: {1} 条".format(len(group_a), len(group_b)))
@@ -1141,7 +1362,7 @@ if __name__ == '__main__':
                 
                 # 创建AB组之间的贝塞尔曲线连接
                 curves = create_cross_group_bezier_connections(
-                    group_a, group_b, fullness_factor, num_points, spatial_ref
+                    group_a, group_b, fullness_factor, num_points, spatial_ref, connection_mode
                 )
                 
                 if not curves or len(curves) == 0:

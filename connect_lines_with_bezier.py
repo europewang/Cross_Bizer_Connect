@@ -3,6 +3,14 @@ import arcpy
 import math
 import os
 
+# 详细日志开关（默认关闭）
+VERBOSE_LOGGING = False
+
+def log_message(message):
+    """条件日志输出函数"""
+    if VERBOSE_LOGGING:
+        arcpy.AddMessage(message)
+
 def get_distance(p1, p2):
     """计算两个 arcpy.Point 之间的欧氏距离"""
     return math.sqrt((p1.X - p2.X)**2 + (p1.Y - p2.Y)** 2)
@@ -83,10 +91,10 @@ def classify_lines_by_slope(lines, tolerance_degrees=30):
         
         # 确保A组是线段数量较少的那组
         if len(group_a) > len(group_b):
-            arcpy.AddMessage(u"A组线段数({0})>B组线段数({1})，交换A、B组".format(len(group_a), len(group_b)))
+            log_message(u"A组线段数({0})>B组线段数({1})，交换A、B组".format(len(group_a), len(group_b)))
             group_a, group_b = group_b, group_a
         else:
-            arcpy.AddMessage(u"A组线段数({0})<=B组线段数({1})，保持不变".format(len(group_a), len(group_b)))
+            log_message(u"A组线段数({0})<=B组线段数({1})，保持不变".format(len(group_a), len(group_b)))
         
         return group_a, group_b
         
@@ -103,7 +111,7 @@ def classify_lines_by_distance(lines):
             arcpy.AddWarning(u"线段数量不足，无法进行距离分组")
             return [], []
         
-        arcpy.AddMessage(u"开始基于距离进行CD分组...")
+        log_message(u"开始基于距离进行CD分组...")
         
         # 获取有效线段和中心点
         valid_lines = []
@@ -155,7 +163,7 @@ def classify_lines_by_distance(lines):
         
         # 确保条数多的为D组，条数少的为C组
         if len(group_c) > len(group_d):
-            arcpy.AddMessage(u"C组线段数({0})>D组线段数({1})，交换C、D组，确保条数多的为D组".format(len(group_c), len(group_d)))
+            log_message(u"C组线段数({0})>D组线段数({1})，交换C、D组，确保条数多的为D组".format(len(group_c), len(group_d)))
             group_c, group_d = group_d, group_c
         
         arcpy.AddMessage(u"距离分组完成: C组{0}条线，D组{1}条线".format(len(group_c), len(group_d)))
@@ -269,9 +277,9 @@ def extend_line_from_last_segment(line, length=1000, use_end_segment=True):
             last_point = points[len(points)-1]  # 最后一个点
             second_last_point = points[len(points)-2]  # 倒数第二个点
             # 打印最后一个点的坐标，保留6位小数
-            arcpy.AddMessage(u"最后一个点坐标: X={:.6f}, Y={:.6f}".format(last_point.X, last_point.Y))
+            log_message(u"最后一个点坐标: X={:.6f}, Y={:.6f}".format(last_point.X, last_point.Y))
             # 打印倒数第二个点的坐标，保留6位小数
-            arcpy.AddMessage(u"倒数第二个点坐标: X={:.6f}, Y={:.6f}".format(second_last_point.X, second_last_point.Y))
+            log_message(u"倒数第二个点坐标: X={:.6f}, Y={:.6f}".format(second_last_point.X, second_last_point.Y))
 
             # 计算尾部一小段的方向向量
             dx = last_point.X - second_last_point.X
@@ -297,9 +305,9 @@ def extend_line_from_last_segment(line, length=1000, use_end_segment=True):
             first_point = points[0]  # 第一个点
             second_point = points[1]  # 第二个点
             # 打印最后一个点的坐标，保留6位小数
-            arcpy.AddMessage(u"第一个点坐标: X={:.6f}, Y={:.6f}".format(first_point.X, first_point.Y))
+            log_message(u"第一个点坐标: X={:.6f}, Y={:.6f}".format(first_point.X, first_point.Y))
             # 打印倒数第二个点的坐标，保留6位小数
-            arcpy.AddMessage(u"第二个点坐标: X={:.6f}, Y={:.6f}".format(second_point.X, second_point.Y))
+            log_message(u"第二个点坐标: X={:.6f}, Y={:.6f}".format(second_point.X, second_point.Y))
 
             
             
@@ -418,6 +426,9 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
         curves = []
         arcpy.AddMessage(u"开始创建A组({0}条)和B组({1}条)之间的贝塞尔曲线连接".format(len(group_a), len(group_b)))
         
+        # 计算预期连接数量用于进度显示
+        expected_connections = min(len(group_a), len(group_b)) + max(0, len(group_b) - 1) if len(group_a) == 1 else min(len(group_a) - 1, len(group_b))
+        
         # 创建可变的线段列表副本
         remaining_a = list(group_a)
         remaining_b = list(group_b)
@@ -468,19 +479,22 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                     curve_start = a_point
                     curve_end = b_point
                     connection_valid = True
-                    arcpy.AddMessage(u"第{0}次连接：A组线起点连接B组线终点".format(connection_count))
+                    progress = int((connection_count / max(expected_connections, 1)) * 100)
+                    arcpy.AddMessage(u"[4/5] 进度 {0}% - 第{1}次连接：A组线起点连接B组线终点".format(progress, connection_count))
                 elif a_type == 'a_end' and b_type == 'b_start':
                     # A线终点连B线起点：符合头尾相连原则
                     curve_start = b_point
                     curve_end = a_point
                     connection_valid = True
-                    arcpy.AddMessage(u"第{0}次连接：B组线起点连接A组线终点".format(connection_count))
+                    progress = int((connection_count / max(expected_connections, 1)) * 100)
+                    arcpy.AddMessage(u"[4/5] 进度 {0}% - 第{1}次连接：B组线起点连接A组线终点".format(progress, connection_count))
                 else:
                     # 其他情况：强制连接最近的点
                     curve_start = a_point
                     curve_end = b_point
                     connection_valid = True
-                    arcpy.AddMessage(u"第{0}次连接：强制连接最近点对".format(connection_count))
+                    progress = int((connection_count / max(expected_connections, 1)) * 100)
+                    arcpy.AddMessage(u"[4/5] 进度 {0}% - 第{1}次连接：强制连接最近点对".format(progress, connection_count))
                 
                 if connection_valid and curve_start and curve_end:
                     # 基于折线头部或尾部一小段延长两条线并找到交点作为控制点
@@ -505,7 +519,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                                 
                                 if curve:
                                     curves.append(curve)
-                                    arcpy.AddMessage(u"成功创建第{0}条贝塞尔曲线，使用折线最后一小段延长线交点作为控制点".format(connection_count))
+                                    log_message(u"成功创建第{0}条贝塞尔曲线，使用折线最后一小段延长线交点作为控制点".format(connection_count))
                                 else:
                                     arcpy.AddWarning(u"第{0}条贝塞尔曲线创建失败".format(connection_count))
                             else:
@@ -521,7 +535,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                                 
                                 if curve:
                                     curves.append(curve)
-                                    arcpy.AddMessage(u"第{0}条贝塞尔曲线使用中点作为控制点创建成功".format(connection_count))
+                                    log_message(u"第{0}条贝塞尔曲线使用中点作为控制点创建成功".format(connection_count))
                         else:
                             arcpy.AddWarning(u"第{0}次连接：线延长失败".format(connection_count))
                             
@@ -531,7 +545,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                 # 移除已连接的线段
                 remaining_a.pop(best_a_idx)
                 remaining_b.pop(best_b_idx)
-                arcpy.AddMessage(u"移除已连接线段，A组剩余{0}条，B组剩余{1}条".format(len(remaining_a), len(remaining_b)))
+                log_message(u"移除已连接线段，A组剩余{0}条，B组剩余{1}条".format(len(remaining_a), len(remaining_b)))
             else:
                 arcpy.AddWarning(u"未找到有效连接，退出循环")
                 break
@@ -539,7 +553,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
         # A组剩下最后一条线时，与B组所有剩余线全连接
         if len(remaining_a) == 1 and len(remaining_b) > 0:
             last_a_line = remaining_a[0]
-            arcpy.AddMessage(u"A组剩余最后1条线，开始与B组剩余{0}条线全连接".format(len(remaining_b)))
+            log_message(u"A组剩余最后1条线，开始与B组剩余{0}条线全连接".format(len(remaining_b)))
             
             for i, line_b in enumerate(remaining_b):
                 connection_count += 1
@@ -582,9 +596,9 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                 if best_connection:
                     best_a_point, best_b_point, connection_type = best_connection
                     if connection_type == 'a_start_b_end':
-                        arcpy.AddMessage(u"最后阶段第{0}次连接：A组线起点连接B组线{1}终点".format(connection_count, i+1))
+                        log_message(u"最后阶段第{0}次连接：A组线起点连接B组线{1}终点".format(connection_count, i+1))
                     else:
-                        arcpy.AddMessage(u"最后阶段第{0}次连接：A组线终点连接B组线{1}起点".format(connection_count, i+1))
+                        log_message(u"最后阶段第{0}次连接：A组线终点连接B组线{1}起点".format(connection_count, i+1))
                     try:
                         # 根据连接的端点类型判断使用头部还是尾部一小段
                         use_end_segment_a = (closest_a_type == 'a_end')  # A线终点连接时使用尾部一小段
@@ -614,7 +628,7 @@ def create_cross_group_bezier_connections(group_a, group_b, fullness_factor, num
                             
                             if curve:
                                 curves.append(curve)
-                                arcpy.AddMessage(u"最后阶段：成功创建第{0}条贝塞尔曲线（A线与B组第{1}条线连接）".format(connection_count, i+1))
+                                log_message(u"最后阶段：成功创建第{0}条贝塞尔曲线（A线与B组第{1}条线连接）".format(connection_count, i+1))
                             else:
                                 arcpy.AddWarning(u"最后阶段：第{0}条贝塞尔曲线创建失败".format(connection_count))
                         else:
@@ -672,6 +686,9 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
         lines = []
         arcpy.AddMessage(u"开始创建C组({0}条)和D组({1}条)之间的直线连接".format(len(group_c), len(group_d)))
         
+        # 计算预期连接数量用于进度显示
+        expected_connections = min(len(group_c), len(group_d))
+        
         if not group_c or not group_d:
             arcpy.AddWarning(u"C组或D组线要素为空，无法创建连接")
             return lines
@@ -693,10 +710,10 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
         # 确定全局连接方向
         if c_head_d_tail_distance <= c_tail_d_head_distance:
             connection_mode = "c_head_d_tail"
-            arcpy.AddMessage(u"确定连接方向：C头连D尾（距离：{0:.2f}）".format(c_head_d_tail_distance))
+            log_message(u"确定连接方向：C头连D尾（距离：{0:.2f}）".format(c_head_d_tail_distance))
         else:
             connection_mode = "c_tail_d_head"
-            arcpy.AddMessage(u"确定连接方向：C尾连D头（距离：{0:.2f}）".format(c_tail_d_head_distance))
+            log_message(u"确定连接方向：C尾连D头（距离：{0:.2f}）".format(c_tail_d_head_distance))
         
         # 第二步：根据连接方向对线段进行排序
         # 根据CD中任意一条线的方向，顺时针转90度的方向作为判断点顺序大小
@@ -725,7 +742,7 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
             perp_dx = 1.0
             perp_dy = 0.0
         
-        arcpy.AddMessage(u"参考线方向：({0:.3f}, {1:.3f})，垂直排序方向：({2:.3f}, {3:.3f})".format(
+        log_message(u"参考线方向：({0:.3f}, {1:.3f})，垂直排序方向：({2:.3f}, {3:.3f})".format(
             line_dx, line_dy, perp_dx, perp_dy))
         
         # 根据连接方向确定要排序的端点
@@ -756,7 +773,7 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
         
         c_lines_sorted = sorted(group_c, key=get_c_key)
         d_lines_sorted = sorted(group_d, key=get_d_key)
-        arcpy.AddMessage(u"按垂直方向投影排序完成")
+        log_message(u"按垂直方向投影排序完成")
         
         # 创建剩余线段列表的副本
         remaining_c = list(c_lines_sorted)
@@ -788,19 +805,20 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
                 straight_line = arcpy.Polyline(arcpy.Array(line_points), spatial_ref)
                 lines.append(straight_line)
                 distance = get_distance(start_point, end_point)
-                arcpy.AddMessage(u"第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
+                progress = int((connection_count / max(expected_connections, 1)) * 100)
+                arcpy.AddMessage(u"[4/5] 进度 {0}% - 第{1}次连接：{2}（距离：{3:.2f}）".format(progress, connection_count, connection_desc, distance))
             except Exception as line_error:
                 arcpy.AddWarning(u"第{0}次连接创建直线时出错: {1}".format(connection_count, line_error))
             
             # 移除已连接的线段
             remaining_c.pop(0)
             remaining_d.pop(0)
-            arcpy.AddMessage(u"移除已连接线段，C组剩余{0}条，D组剩余{1}条".format(len(remaining_c), len(remaining_d)))
+            log_message(u"移除已连接线段，C组剩余{0}条，D组剩余{1}条".format(len(remaining_c), len(remaining_d)))
         
         # 第四步：C组剩下最后一条线时，与D组所有剩余线按顺序连接
         if len(remaining_c) == 1 and len(remaining_d) > 0:
             last_c_line = remaining_c[0]
-            arcpy.AddMessage(u"C组剩余最后1条线，开始与D组剩余{0}条线按顺序连接".format(len(remaining_d)))
+            log_message(u"C组剩余最后1条线，开始与D组剩余{0}条线按顺序连接".format(len(remaining_d)))
             
             for i, line_d in enumerate(remaining_d):
                 connection_count += 1
@@ -821,7 +839,7 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
                     straight_line = arcpy.Polyline(arcpy.Array(line_points), spatial_ref)
                     lines.append(straight_line)
                     distance = get_distance(start_point, end_point)
-                    arcpy.AddMessage(u"最后阶段第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
+                    log_message(u"最后阶段第{0}次连接：{1}（距离：{2:.2f}）".format(connection_count, connection_desc, distance))
                 except Exception as line_error:
                     arcpy.AddWarning(u"最后阶段创建直线时出错: {0}".format(line_error))
         
@@ -834,45 +852,57 @@ def create_cross_group_straight_connections(group_c, group_d, spatial_ref):
 
 if __name__ == '__main__':
     try:
-        arcpy.AddMessage(u"脚本开始执行...")
+        arcpy.AddMessage(u"=== 贝塞尔曲线连接工具开始执行 ===")
+        arcpy.AddMessage(u"[1/5] 正在获取和验证参数...")
 
         # 获取参数
-        arcpy.AddMessage(u"正在获取参数 0 (输入要素)...")
+        log_message(u"正在获取参数 0 (输入要素)...")
         input_features = arcpy.GetParameter(0)
         if not input_features:
             raise ValueError(u"输入要素 (参数 0) 未提供或无效。")
-        arcpy.AddMessage(u"参数 0 获取成功。")
+        log_message(u"参数 0 获取成功。")
 
         # 不再需要输出路径参数，直接写入输入要素类
         output_fc = input_features
-        arcpy.AddMessage(u"将在输入要素类中添加贝塞尔曲线")
+        log_message(u"将在输入要素类中添加贝塞尔曲线")
 
         # 设置默认的曲线参数
         fullness_factor = 0.5  # 默认曲线饱满度
         num_points = 20  # 默认曲线平滑度
-        arcpy.AddMessage(u"使用默认曲线参数 - 饱满度: {}, 平滑度: {}".format(fullness_factor, num_points))
-
-        arcpy.AddMessage(u"正在获取参数 1 (是否采用曲线连接)...")
-        use_curve_connection = arcpy.GetParameter(1)
-        if use_curve_connection is None:
-            use_curve_connection = True  # 默认勾选，采用曲线连接
-            arcpy.AddWarning(u"连接方式参数无效，使用默认值: 曲线连接")
+        log_message(u"使用默认曲线参数 - 饱满度: {}, 平滑度: {}".format(fullness_factor, num_points))
         
-        if use_curve_connection:
-            connection_mode = u"曲线连接"
+        # 初始化curves变量，防止在异常处理中出现未定义错误
+        curves = []
+
+        log_message(u"正在获取参数 1 (连接方式)...")
+        connection_mode = arcpy.GetParameterAsText(1)
+        if not connection_mode or connection_mode == "#":
+            connection_mode = u"智能连接"  # 默认选择智能连接
+            arcpy.AddWarning(u"连接方式参数无效，使用默认值: 智能连接")
+        
+        # 根据选择器的值确定连接方式
+        if connection_mode == u"曲线连接":
+            use_curve_connection = True
+        elif connection_mode == u"直线连接":
+            use_curve_connection = False
+        elif connection_mode == u"智能连接":
+            use_curve_connection = None  # 待智能判断
         else:
-            connection_mode = u"直线连接"
+            # 兼容性处理：如果是其他值，默认为智能连接
+            use_curve_connection = None
+            connection_mode = u"智能连接"
+            arcpy.AddWarning(u"未识别的连接方式参数，使用默认值: 智能连接")
         
-        arcpy.AddMessage(u"参数 1 (连接方式): {}".format(connection_mode))
+        log_message(u"参数 1 (连接方式): {}".format(connection_mode))
 
-        arcpy.AddMessage(u"所有参数获取成功。")
+        arcpy.AddMessage(u"[1/5] 参数验证完成 ✓")
 
         # 输入要素验证
-        arcpy.AddMessage(u"正在验证输入要素...")
+        log_message(u"正在验证输入要素...")
         desc = arcpy.Describe(input_features)
         if desc.shapeType != "Polyline":
             raise ValueError(u"输入要素必须是线要素图层（Polyline），当前类型为：{0}".format(desc.shapeType))
-        arcpy.AddMessage(u"输入要素类型验证通过: 线要素图层")
+        log_message(u"输入要素类型验证通过: 线要素图层")
 
         # 确定要素ID字段名（解决Shapefile和GDB的差异）# 确定要素ID字段
         id_field = "FID"
@@ -881,16 +911,16 @@ if __name__ == '__main__':
             id_field = "FID"  # Shapefile使用FID
         elif desc.dataType == "FeatureClass":
             id_field = "OBJECTID"  # 地理数据库要素类使用OBJECTID
-        arcpy.AddMessage(u"使用的要素ID字段: {0}".format(id_field))
+        log_message(u"使用的要素ID字段: {0}".format(id_field))
 
         # 分析输入要素信息
-        arcpy.AddMessage(u"正在分析输入要素...")
-        arcpy.AddMessage(u"输入要素类型: {0}".format(desc.dataType))
-        arcpy.AddMessage(u"输入要素路径: {0}".format(desc.catalogPath if hasattr(desc, 'catalogPath') else '未知'))
+        log_message(u"正在分析输入要素...")
+        log_message(u"输入要素类型: {0}".format(desc.dataType))
+        log_message(u"输入要素路径: {0}".format(desc.catalogPath if hasattr(desc, 'catalogPath') else '未知'))
         
         # 获取空间参考
         spatial_ref = desc.spatialReference
-        arcpy.AddMessage(u"空间参考: {0}".format(spatial_ref.name if spatial_ref else '未定义'))
+        log_message(u"空间参考: {0}".format(spatial_ref.name if spatial_ref else '未定义'))
         
         # # 处理未定义的空间参考
         # if not spatial_ref or spatial_ref.name == "Unknown":
@@ -907,10 +937,10 @@ if __name__ == '__main__':
         #             arcpy.AddWarning(u"无法设置空间参考系统，将使用无空间参考模式")
 
         # 直接使用输入要素类，不需要创建新的输出要素类
-        arcpy.AddMessage(u"将直接在输入要素类中添加贝塞尔曲线")
+        log_message(u"将直接在输入要素类中添加贝塞尔曲线")
 
         # 读取输入的线要素
-        arcpy.AddMessage(u"正在读取输入要素...")
+        arcpy.AddMessage(u"[2/5] 正在读取输入要素...")
         lines = []
         feature_count = 0
         total_count = 0
@@ -919,19 +949,19 @@ if __name__ == '__main__':
         try:
             result = arcpy.GetCount_management(input_features)
             total_count = int(result.getOutput(0))
-            arcpy.AddMessage(u"输入要素总数: {0}".format(total_count))
+            log_message(u"输入要素总数: {0}".format(total_count))
         except:
-            arcpy.AddMessage(u"无法获取要素总数，继续处理...")
+            log_message(u"无法获取要素总数，继续处理...")
         
         # 检查选择集
         has_user_selection = False
         selection_oids = []
         if hasattr(desc, 'FIDSet') and desc.FIDSet:
-            arcpy.AddMessage(u"有选择集：FIDSet: {0}".format(desc.FIDSet))
+            log_message(u"有选择集：FIDSet: {0}".format(desc.FIDSet))
             selection_oids = [int(fid) for fid in desc.FIDSet.split(';') if fid.strip()]
             if len(selection_oids) > 0:
                 has_user_selection = True
-                arcpy.AddMessage(u"检测到选择集，包含 {0} 个要素".format(len(selection_oids)))
+                log_message(u"检测到选择集，包含 {0} 个要素".format(len(selection_oids)))
 
         # 读取要素 - 优先处理选择集
         if has_user_selection and len(selection_oids) > 0:
@@ -966,7 +996,7 @@ if __name__ == '__main__':
                                 if geometry.type.lower() == "polyline":
                                     if geometry.length > 0 and geometry.pointCount > 1:
                                         lines.append(geometry)
-                                        arcpy.AddMessage(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
+                                        log_message(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
                                     else:
                                         arcpy.AddWarning(u"跳过无效线要素 OID: {0} (长度为0或点数不足)".format(oid))
                                 else:
@@ -976,7 +1006,7 @@ if __name__ == '__main__':
                         else:
                             arcpy.AddWarning(u"跳过空几何要素 OID: {0}".format(oid))
                 
-                arcpy.AddMessage(u"从选择集读取了 {0} 个要素".format(len(lines)))
+                log_message(u"从选择集读取了 {0} 个要素".format(len(lines)))
                 
                 # 清理临时要素类
                 try:
@@ -988,7 +1018,7 @@ if __name__ == '__main__':
                     
             except Exception as cursor_error:
                 arcpy.AddWarning(u"处理选择集失败: {0}".format(cursor_error))
-                arcpy.AddMessage(u"回退到处理所有要素...")
+                log_message(u"回退到处理所有要素...")
                 
                 # 清理临时要素类
                 try:
@@ -1003,7 +1033,7 @@ if __name__ == '__main__':
 
         # 如果没有选择集或选择集处理失败，读取所有要素
         if not has_user_selection or len(lines) == 0:
-            arcpy.AddMessage(u"读取所有线要素...")
+            log_message(u"读取所有线要素...")
             try:
                 # 优先使用catalogPath，如果不存在则使用input_features
                 data_source = desc.catalogPath if hasattr(desc, 'catalogPath') and desc.catalogPath else input_features
@@ -1022,7 +1052,7 @@ if __name__ == '__main__':
                                  if geometry.type.lower() == "polyline":
                                      if geometry.length > 0 and geometry.pointCount > 1:
                                          lines.append(geometry)
-                                         arcpy.AddMessage(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
+                                         log_message(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
                                      else:
                                          arcpy.AddWarning(u"跳过无效线要素 OID: {0} (长度为0或点数不足)".format(oid))
                                  else:
@@ -1049,7 +1079,7 @@ if __name__ == '__main__':
                                         if geometry.type.lower() == "polyline":
                                             if geometry.length > 0 and geometry.pointCount > 1:
                                                 lines.append(geometry)
-                                                arcpy.AddMessage(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
+                                                log_message(u"读取到有效线要素 OID: {0}, 长度: {1:.2f}".format(oid, geometry.length))
                                             else:
                                                 arcpy.AddWarning(u"跳过无效线要素 OID: {0} (长度为0或点数不足)".format(oid))
                                         else:
@@ -1061,7 +1091,7 @@ if __name__ == '__main__':
                 except Exception as alternative_error:
                     arcpy.AddWarning(u"使用备用数据源读取要素也失败: {0}".format(alternative_error))
         
-        arcpy.AddMessage(u"总共处理了 {0} 个要素，其中 {1} 个是有效的线要素。".format(feature_count, len(lines)))
+        arcpy.AddMessage(u"[2/5] 要素读取完成 ✓ - 总共处理了 {0} 个要素，其中 {1} 个是有效的线要素".format(feature_count, len(lines)))
 
         if not lines:
             if feature_count == 0:
@@ -1070,9 +1100,32 @@ if __name__ == '__main__':
                 raise ValueError(u"输入的 {0} 个要素中没有找到有效线要素。".format(feature_count))
 
         # 根据连接方式参数选择不同的分组和连接策略
+        if use_curve_connection is None:
+            # 智能连接：先按斜率分类，根据分组结果决定连接方式
+            arcpy.AddMessage(u"[3/5] 采用智能连接方式，开始按斜率分析线要素...")
+            
+            try:
+                # 按斜率分类线要素
+                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
+                
+                if len(group_a) == 0 or len(group_b) == 0:
+                    # 其中一组为0条线，智能选取采用直线连接
+                    log_message(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
+                    log_message(u"智能连接判断：采用直线连接方式")
+                    use_curve_connection = False
+                else:
+                    # 两组都有数据，智能选取采用曲线连接
+                    log_message(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
+                    log_message(u"智能连接判断：采用曲线连接方式")
+                    use_curve_connection = True
+                    
+            except Exception as classify_error:
+                arcpy.AddWarning(u"斜率分类失败: {0}，默认采用直线连接".format(classify_error))
+                use_curve_connection = False
+        
         if use_curve_connection:
             # 曲线连接：使用斜率容差分类线要素为AB两组
-            arcpy.AddMessage(u"执行曲线连接方式，开始按斜率分类线要素...")
+            arcpy.AddMessage(u"[3/5] 执行曲线连接方式，开始按斜率分类线要素...")
             
             try:
                 # 按斜率分类线要素
@@ -1080,10 +1133,11 @@ if __name__ == '__main__':
                 
                 if len(group_a) == 0 or len(group_b) == 0:
                     arcpy.AddWarning(u"无法将线要素分为两组，A组: {0} 条，B组: {1} 条".format(len(group_a), len(group_b)))
-                    arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                    log_message(u"回退到原有的成对连接方式...")
                     raise Exception(u"线要素分组失败")
                 
-                arcpy.AddMessage(u"成功分组：A组 {0} 条线，B组 {1} 条线".format(len(group_a), len(group_b)))
+                arcpy.AddMessage(u"[3/5] 分组完成 ✓ - A组 {0} 条线，B组 {1} 条线".format(len(group_a), len(group_b)))
+                arcpy.AddMessage(u"[4/5] 正在创建贝塞尔曲线连接...")
                 
                 # 创建AB组之间的贝塞尔曲线连接
                 curves = create_cross_group_bezier_connections(
@@ -1096,10 +1150,10 @@ if __name__ == '__main__':
                     
             except Exception as group_error:
                 arcpy.AddWarning(u"AB组连接失败: {0}".format(group_error))
-                arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                log_message(u"回退到原有的成对连接方式...")
         else:
             # 直线连接：使用距离分类线要素为CD两组
-            arcpy.AddMessage(u"执行直线连接方式，开始按距离分类线要素...")
+            arcpy.AddMessage(u"[3/5] 执行直线连接方式，开始按距离分类线要素...")
             
             try:
                 # 按距离分类线要素
@@ -1107,10 +1161,11 @@ if __name__ == '__main__':
                 
                 if len(group_c) == 0 or len(group_d) == 0:
                     arcpy.AddWarning(u"无法将线要素分为两组，C组: {0} 条，D组: {1} 条".format(len(group_c), len(group_d)))
-                    arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                    log_message(u"回退到原有的成对连接方式...")
                     raise Exception(u"线要素分组失败")
                 
-                arcpy.AddMessage(u"成功分组：C组 {0} 条线，D组 {1} 条线".format(len(group_c), len(group_d)))
+                arcpy.AddMessage(u"[3/5] 分组完成 ✓ - C组 {0} 条线，D组 {1} 条线".format(len(group_c), len(group_d)))
+                arcpy.AddMessage(u"[4/5] 正在创建直线连接...")
                 
                 # 创建CD组之间的直线连接
                 curves = create_cross_group_straight_connections(
@@ -1123,17 +1178,17 @@ if __name__ == '__main__':
                     
             except Exception as group_error:
                 arcpy.AddWarning(u"CD组连接失败: {0}".format(group_error))
-                arcpy.AddMessage(u"回退到原有的成对连接方式...")
+                log_message(u"回退到原有的成对连接方式...")
         
         # 将曲线写入输入要素类（使用编辑会话避免锁定问题）
-        arcpy.AddMessage(u"开始将贝塞尔曲线写入输入要素类...")
+        arcpy.AddMessage(u"[5/5] 正在将连接线写入要素类...")
         
         # 获取工作空间路径
         workspace = os.path.dirname(desc.catalogPath) if hasattr(desc, 'catalogPath') and desc.catalogPath else None
         
         if workspace and workspace.endswith('.gdb'):
             # 地理数据库需要编辑会话
-            arcpy.AddMessage(u"检测到地理数据库，启动编辑会话...")
+            log_message(u"检测到地理数据库，启动编辑会话...")
             edit = arcpy.da.Editor(workspace)
             edit.startEditing(False, True)
             edit.startOperation()
@@ -1141,16 +1196,24 @@ if __name__ == '__main__':
             try:
                 with arcpy.da.InsertCursor(input_features, ["SHAPE@"]) as insert_cursor:
                     curves_created = 0
-                    for curve in curves:
+                    total_curves = len([c for c in curves if c])
+                    
+                    for i, curve in enumerate(curves):
                         if curve:
                             insert_cursor.insertRow([curve])
                             curves_created += 1
+                            
+                            # 显示写入进度
+                            if total_curves > 0:
+                                progress = int((curves_created / total_curves) * 100)
+                                if curves_created % max(1, total_curves // 10) == 0 or curves_created == total_curves:
+                                    arcpy.AddMessage(u"[5/5] 写入进度 {0}% - 已写入 {1}/{2} 条连接线".format(progress, curves_created, total_curves))
                     
-                    arcpy.AddMessage(u"总共成功创建了 {0} 条方向性贝塞尔曲线".format(curves_created))
+                    arcpy.AddMessage(u"[5/5] 写入完成 ✓ - 总共成功创建了 {0} 条连接线".format(curves_created))
                 
                 edit.stopOperation()
                 edit.stopEditing(True)
-                arcpy.AddMessage(u"编辑会话已保存并关闭")
+                log_message(u"编辑会话已保存并关闭")
                 
             except Exception as edit_error:
                 edit.stopOperation()
@@ -1159,30 +1222,38 @@ if __name__ == '__main__':
                 raise
         else:
              # Shapefile或其他格式，需要特殊处理避免锁定
-             arcpy.AddMessage(u"检测到Shapefile格式，使用特殊方法插入...")
+             log_message(u"检测到Shapefile格式，使用特殊方法插入...")
              
              # 先清除选择集，避免锁定冲突
              try:
                  arcpy.SelectLayerByAttribute_management(input_features, "CLEAR_SELECTION")
-                 arcpy.AddMessage(u"已清除选择集")
+                 log_message(u"已清除选择集")
              except:
-                 arcpy.AddMessage(u"无法清除选择集，继续尝试插入")
+                 log_message(u"无法清除选择集，继续尝试插入")
              
              # 获取数据源路径
              data_source = desc.catalogPath if hasattr(desc, 'catalogPath') and desc.catalogPath else input_features
-             arcpy.AddMessage(u"使用数据源: {0}".format(data_source))
+             log_message(u"使用数据源: {0}".format(data_source))
              
              try:
                  with arcpy.da.InsertCursor(data_source, ["SHAPE@"]) as insert_cursor:
                      curves_created = 0
-                     for curve in curves:
+                     total_curves = len([c for c in curves if c])
+                     
+                     for i, curve in enumerate(curves):
                          if curve:
                              insert_cursor.insertRow([curve])
                              curves_created += 1
+                             
+                             # 显示写入进度
+                             if total_curves > 0:
+                                 progress = int((curves_created / total_curves) * 100)
+                                 if curves_created % max(1, total_curves // 10) == 0 or curves_created == total_curves:
+                                     arcpy.AddMessage(u"[5/5] 写入进度 {0}% - 已写入 {1}/{2} 条连接线".format(progress, curves_created, total_curves))
                      
-                     arcpy.AddMessage(u"总共成功创建了 {0} 条方向性贝塞尔曲线".format(curves_created))
+                     arcpy.AddMessage(u"[5/5] 写入完成 ✓ - 总共成功创建了 {0} 条连接线".format(curves_created))
              except Exception as insert_error:
-                 arcpy.AddMessage(u"直接插入失败，尝试使用临时要素类方法: {0}".format(insert_error))
+                 log_message(u"直接插入失败，尝试使用临时要素类方法: {0}".format(insert_error))
                  
                  # 创建临时要素类存储贝塞尔曲线
                  import tempfile
@@ -1201,15 +1272,23 @@ if __name__ == '__main__':
                  # 将曲线写入临时要素类
                  with arcpy.da.InsertCursor(temp_curves_fc, ["SHAPE@"]) as temp_cursor:
                      curves_created = 0
-                     for curve in curves:
+                     total_curves = len([c for c in curves if c])
+                     
+                     for i, curve in enumerate(curves):
                          if curve:
                              temp_cursor.insertRow([curve])
                              curves_created += 1
+                             
+                             # 显示写入进度
+                             if total_curves > 0:
+                                 progress = int((curves_created / total_curves) * 100)
+                                 if curves_created % max(1, total_curves // 10) == 0 or curves_created == total_curves:
+                                     arcpy.AddMessage(u"[5/5] 临时写入进度 {0}% - 已写入 {1}/{2} 条连接线".format(progress, curves_created, total_curves))
                  
                  # 将临时要素类追加到原始要素类
                  arcpy.Append_management(temp_curves_fc, data_source, "NO_TEST")
                  connection_type_msg = u"贝塞尔曲线" if use_curve_connection else u"直线连接"
-                 arcpy.AddMessage(u"通过临时要素类成功添加了 {0} 条{1}".format(curves_created, connection_type_msg))
+                 arcpy.AddMessage(u"[5/5] 写入完成 ✓ - 通过临时要素类成功添加了 {0} 条{1}".format(curves_created, connection_type_msg))
                  
                  # 清理临时文件
                  try:
@@ -1219,7 +1298,7 @@ if __name__ == '__main__':
                      pass
 
         final_msg = u"贝塞尔曲线创建成功！" if use_curve_connection else u"直线连接创建成功！"
-        arcpy.AddMessage(u"{0}已添加到输入要素类中".format(final_msg))
+        arcpy.AddMessage(u"=== 执行完成 === {0}已添加到输入要素类中".format(final_msg))
 
     except Exception as e:
         arcpy.AddError(u"脚本执行出错: {0}".format(e))

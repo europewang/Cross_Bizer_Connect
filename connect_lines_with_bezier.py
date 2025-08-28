@@ -852,18 +852,16 @@ if __name__ == '__main__':
         num_points = 20  # 默认曲线平滑度
         arcpy.AddMessage(u"使用默认曲线参数 - 饱满度: {}, 平滑度: {}".format(fullness_factor, num_points))
 
-        arcpy.AddMessage(u"正在获取参数 1 (是否强制直线连接)...")
-        force_straight_connection = arcpy.GetParameter(1)
-        if force_straight_connection is None:
-            force_straight_connection = False  # 默认不勾选，采用智能选取
-            arcpy.AddWarning(u"连接方式参数无效，使用默认值: 智能选取")
+        arcpy.AddMessage(u"正在获取参数 1 (是否采用曲线连接)...")
+        use_curve_connection = arcpy.GetParameter(1)
+        if use_curve_connection is None:
+            use_curve_connection = True  # 默认勾选，采用曲线连接
+            arcpy.AddWarning(u"连接方式参数无效，使用默认值: 曲线连接")
         
-        if force_straight_connection:
-            connection_mode = u"强制直线连接"
-            use_curve_connection = False
+        if use_curve_connection:
+            connection_mode = u"曲线连接"
         else:
-            connection_mode = u"智能选取"
-            use_curve_connection = None  # 待智能判断
+            connection_mode = u"直线连接"
         
         arcpy.AddMessage(u"参数 1 (连接方式): {}".format(connection_mode))
 
@@ -1072,29 +1070,6 @@ if __name__ == '__main__':
                 raise ValueError(u"输入的 {0} 个要素中没有找到有效线要素。".format(feature_count))
 
         # 根据连接方式参数选择不同的分组和连接策略
-        if use_curve_connection is None:
-            # 智能选取：先按斜率分类，根据分组结果决定连接方式
-            arcpy.AddMessage(u"采用智能选取方式，开始按斜率分析线要素...")
-            
-            try:
-                # 按斜率分类线要素
-                group_a, group_b = classify_lines_by_slope(lines, tolerance_degrees=30)
-                
-                if len(group_a) == 0 or len(group_b) == 0:
-                    # 其中一组为0条线，智能选取采用直线连接
-                    arcpy.AddMessage(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
-                    arcpy.AddMessage(u"智能选取判断：采用直线连接方式")
-                    use_curve_connection = False
-                else:
-                    # 两组都有数据，智能选取采用曲线连接
-                    arcpy.AddMessage(u"斜率分组结果：A组 {0} 条，B组 {1} 条".format(len(group_a), len(group_b)))
-                    arcpy.AddMessage(u"智能选取判断：采用曲线连接方式")
-                    use_curve_connection = True
-                    
-            except Exception as classify_error:
-                arcpy.AddWarning(u"斜率分类失败: {0}，默认采用直线连接".format(classify_error))
-                use_curve_connection = False
-        
         if use_curve_connection:
             # 曲线连接：使用斜率容差分类线要素为AB两组
             arcpy.AddMessage(u"执行曲线连接方式，开始按斜率分类线要素...")
